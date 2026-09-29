@@ -117,7 +117,7 @@ export async function VoteDetail({ id }) {
       v.hasVoted ? div(callout('ok', t('You have voted.')), S.receipt ? receiptBox(S.receipt) : p({ class: 'small muted' }, t('Your receipt code was shown when you voted.'))) :
         v.eligible ? div(h2(t('Cast your secret ballot')),
           div({ class: 'stack' }, v.options.map((o, i) => div({ class: `choice ${S.choice === i ? 'on' : ''}`, role: 'radio', 'aria-checked': S.choice === i, tabindex: 0, onclick: () => { S.choice = i; update(); }, onkeydown: (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); S.choice = i; update(); } } }, strong(o)))),
-          p({ class: 'small muted' }, t('Nobody, including the officers and this website, can tell how you voted. You cannot change your vote afterward.')),
+          p({ class: 'small muted' }, t('Your ballot is stored without your name or the time you voted, so officers and other members cannot see how you voted. You cannot change your vote afterward.')),
           btn(t('Cast my ballot'), act(async () => {
             if (S.choice == null) return toast(t('Choose an option first.'), 'bad');
             const b = C.castBallot(v.votePublicKey, S.choice);
@@ -140,7 +140,7 @@ export async function VoteDetail({ id }) {
       p({ class: 'small muted' }, t('{a} of {b} eligible members voted. {c} ballots counted.', { a: r.voted, b: r.eligible, c: r.total }), r.invalid ? ' ' + t('{n} ballot(s) could not be read and were not counted.', { n: r.invalid }) : ''),
       v.effect && r.passed ? callout('ok', t('This decision has been carried out automatically.')) : null,
       h3(t('Check the count yourself')),
-      S.receipt ? p(receipts.includes(C.receiptHash(S.receipt)) ? '✓ ' + t('Your ballot is in the list of counted ballots.') : '✗ ' + t('Your receipt was NOT found in the list. Tell the committee.')) : null,
+      S.receipt ? p(receipts.includes(C.receiptHash(S.receipt)) ? '✓ ' + t('Your receipt is in the list, so your vote was recorded.') : '✗ ' + t('Your receipt was NOT found in the list. Tell the committee.')) : null,
       div({ class: 'row' }, field(t('Check a receipt code'), textInput({ value: S.check, placeholder: 'ABCD-EFGH-JKMN-PQRS', oninput: (e) => (S.check = e.target.value) })), btn(t('Check'), () => { S.checkResult = receipts.includes(C.receiptHash(S.check)); update(); }, { kind: 'secondary small' })),
       S.checkResult != null ? p(S.checkResult ? '✓ ' + t('That receipt is in the list.') : '✗ ' + t('That receipt is not in the list.')) : null,
       v.keyPublished ? div(btn(t('Recount every ballot in my browser'), act(async () => {
@@ -148,7 +148,7 @@ export async function VoteDetail({ id }) {
         const mine = C.countBallots(pub.votePublicKey, pub.secretKey, pub.ballots, v.options.length);
         S.recount = { counts: mine.counts, same: mine.counts.every((c, i) => c === r.counts[i]), n: pub.ballots.length, receipts: pub.receiptHashes.length };
         update();
-      }), { kind: 'primary small' }), S.recount ? callout(S.recount.same ? 'ok' : 'danger', S.recount.same ? t('Your browser recounted {n} ballots and got exactly the published result.', { n: S.recount.n }) : t('Your recount does NOT match the published result. Raise this with the committee.')) : null)
+      }), { kind: 'primary small' }), S.recount ? callout(S.recount.same ? 'ok' : 'danger', S.recount.same ? t('Your browser recounted {n} ballots and got exactly the published result. That shows the published numbers match the ballots stored on the server; it cannot show that a ballot was never replaced before the key was published.', { n: S.recount.n }) : t('Your recount does NOT match the published result. Raise this with the committee.')) : null)
         : p({ class: 'small muted' }, t('The committee counted privately and did not publish the key, so a recount is not possible for this vote.')));
   }
 }

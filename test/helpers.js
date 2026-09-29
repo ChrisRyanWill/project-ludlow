@@ -105,9 +105,9 @@ export async function login(h, m) {
   return m;
 }
 
-export async function makeWorkspace(h, people, { stage = 'recognized' } = {}) {
+export async function makeWorkspace(h, people, { stage = 'recognized', fiscalYearStart } = {}) {
   const claims = people.map(() => C.newToken());
-  const r = await h.call('POST', '/api/ws', { body: { confirmedPublic: true, stage, unionName: 'Leakcheck Workers United', employerName: 'Leakcheck Industries LLC', jurisdiction: 'us-nlra', members: people.map((p, i) => ({ ...p, legalName: p.name, claimTokenHash: C.hashToken(claims[i]), status: p.status ?? 'member' })) } });
+  const r = await h.call('POST', '/api/ws', { body: { confirmedPublic: true, stage, ...(fiscalYearStart ? { fiscalYearStart } : {}), unionName: 'Leakcheck Workers United', employerName: 'Leakcheck Industries LLC', jurisdiction: 'us-nlra', members: people.map((p, i) => ({ ...p, legalName: p.name, claimTokenHash: C.hashToken(claims[i]), status: p.status ?? 'member' })) } });
   if (r.status !== 200) throw new Error('create workspace failed: ' + JSON.stringify(r.json));
   const wsId = r.json.workspaceId;
   const members = [];

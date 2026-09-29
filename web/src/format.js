@@ -12,3 +12,7 @@ export function formatDate(iso, lang = 'en') {
 }
 export const formatDateTime = (iso, lang = 'en') => (iso ? new Date(iso).toLocaleString(lang, { dateStyle: 'medium', timeStyle: 'short' }) : '');
 export const formatMoney = (cents, currency = 'USD', lang = 'en') => new Intl.NumberFormat(lang, { style: 'currency', currency }).format((cents || 0) / 100);
+
+// Text that goes into a Markdown heading must not be able to turn into a link, emphasis or code: a union name such as "[click](https://phish.example)"
+// would otherwise render as a real link inside the rules members are told to trust. The renderer has no escape syntax, so the characters are removed.
+export const plainMd = (s) => String(s ?? '').replace(/[\[\]()*`]/g, '').replace(/\s+/g, ' ').trim();

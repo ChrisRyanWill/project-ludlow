@@ -79,7 +79,8 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     need(Array.isArray(b.members) && b.members.length >= 1 && b.members.length <= 3000);
     const jurisdiction = /^[a-z0-9-]{2,30}$/.test(b.jurisdiction || '') ? b.jurisdiction : 'us-nlra';
     const timezone = validTz(b.timezone) ? b.timezone : 'America/Denver';
-    const fy = /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(b.fiscalYearStart || '') ? b.fiscalYearStart : '01-01';
+    const validMonthDay = (s) => { const m = /^(\d{2})-(\d{2})$/.exec(s || ''); return !!m && Number(m[1]) >= 1 && Number(m[1]) <= 12 && Number(m[2]) >= 1 && Number(m[2]) <= [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][Number(m[1]) - 1]; };
+    const fy = validMonthDay(b.fiscalYearStart) ? b.fiscalYearStart : '01-01';
     const members = b.members.map(cleanMember);
     if (!members.some((m) => m.roles.includes('officer'))) fail(400, 'officer_required');
     const wsId = randomUUID(), { dk, wrapped } = kms.newDataKey(), t = now();
@@ -188,9 +189,12 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     return { status: 'member' };
   });
   W('POST', '/api/ws/me/profile', 'me.write', ({ me, body: b }) => {
+    // A field the form does not send keeps its value; only what is sent changes (saving used to erase the location and language).
+    const cur = db.prepare('SELECT shift, location, preferred_language pl FROM ws_members WHERE id=?').get(me.id);
+    const keep = (sent, old, max) => (sent === undefined ? old : optStr(sent, max));
     db.prepare('UPDATE ws_members SET phone_enc=?, address_enc=?, job_title_enc=?, shift=?, location=?, preferred_language=? WHERE id=?').run(
       enc(me.dk, 'member.phone', optStr(b.phone, 32)), enc(me.dk, 'member.address', optStr(b.address, 300)), enc(me.dk, 'member.job_title', optStr(b.jobTitle, 120)),
-      optStr(b.shift, 60), optStr(b.location, 60), optStr(b.preferredLanguage, 30), me.id);
+      keep(b.shift, cur.shift, 60), keep(b.location, cur.location, 60), keep(b.preferredLanguage, cur.pl, 30), me.id);
     return { saved: true };
   });
   // Members can always see who looked at their record.
@@ -593,6 +597,9 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       assignedTo: g.assigned_to ? { id: g.assigned_to, name: nameOf(me.dk, g.assigned_to) } : null,
     };
   }
+  // The contract article is kept in the clear so the case list can show it, so it may only be a short reference like "Art. 12" (the words of the
+  // concern are what is encrypted). A longer entry is refused instead of quietly storing, say, a supervisor's name in plaintext.
+  const articleRef = (v) => (v == null || v === '' ? null : typeof v === 'string' && /^[A-Za-z0-9 .§-]{1,20}$/.test(v.trim()) ? v.trim() : fail(400, 'bad_article'));
   W('POST', '/api/ws/grievances', 'grievance.submit', ({ me, body: b }) => {
     need(isUuid(b.id) && isB64(b.ciphertext, 16, 60000) && isB64(b.nonce, 32, 32) && b.sealedKeys && typeof b.sealedKeys === 'object');
     const chiefs = holders(me.wsId, 'chief_steward', true);
@@ -604,7 +611,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     try {
       db.transaction(() => {
         db.prepare(`INSERT INTO ws_grievances (id,workspace_id,submitted_by,article_ref,content_ciphertext,content_nonce,sealed_keys,filed_on,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-          .run(b.id, me.wsId, me.id, optStr(b.articleRef, 60), b.ciphertext, b.nonce, JSON.stringify(b.sealedKeys), today, now());
+          .run(b.id, me.wsId, me.id, articleRef(b.articleRef), b.ciphertext, b.nonce, JSON.stringify(b.sealedKeys), today, now());
         proc.steps.forEach((s, i) => db.prepare('INSERT INTO ws_grievance_steps (grievance_id,step_number,name,days,day_type,started_on,due_on) VALUES (?,?,?,?,?,?,?)')
           .run(b.id, i + 1, s.name, s.days, s.dayType, i === 0 ? today : null, i === 0 ? dueDate(today, s, proc.holidays) : null));
         audit(me.wsId, me.id, 'grievance.filed', 'grievance', b.id);
@@ -763,7 +770,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     return { genesis: GENESIS, entries: rows.map((r) => ({ seq: r.seq, date: r.entry_date, kind: r.kind, cents: r.amount_cents, cat: r.category, rev: r.reverses_id ? seqOf.get(r.reverses_id) : null, at: r.created_at, commit: r.commit_hash, prevHash: r.prev_hash, hash: r.hash })) };
   });
   W('POST', '/api/ws/ledger/receipt', 'ledger.record', ({ me, body: b }) => {
-    need(RECEIPT_CATEGORIES[b.category]);
+    need(Object.hasOwn(RECEIPT_CATEGORIES, b.category)); // own keys only: "constructor" is a property of every object
     const r = addLedger(me, { kind: 'receipt', amountCents: money(b), category: b.category, payee: optStr(b.payer, 120), memo: optStr(b.memo, 300) });
     audit(me.wsId, me.id, 'ledger.receipt', 'ledger', r.id);
     return r;
@@ -783,7 +790,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
 
   const disbursementNeeds = (me, cents) => (cents >= policyOf(me).twoApprovalCents ? 2 : 1);
   W('POST', '/api/ws/disbursements', 'disbursement.request', ({ me, body: b }) => {
-    need(DISBURSEMENT_CATEGORIES[b.category] && isStr(b.payee, 120));
+    need(Object.hasOwn(DISBURSEMENT_CATEGORIES, b.category) && isStr(b.payee, 120));
     const cents = money(b), id = randomUUID();
     db.prepare('INSERT INTO ws_disbursements (id,workspace_id,requested_by,amount_cents,category,payee_enc,memo_enc,required_approvals,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
       .run(id, me.wsId, me.id, cents, b.category, enc(me.dk, 'disb.payee', b.payee.trim()), enc(me.dk, 'disb.memo', optStr(b.memo, 300)), disbursementNeeds(me, cents), now());

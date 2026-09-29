@@ -5,6 +5,7 @@ import { fail } from './http.js';
 import { hashToken, vouchHash, verifyAuth } from '../shared/crypto.js';
 import { issueChallenge, takeChallenge, bearer, sigHeader } from './auth.js';
 import { confirmationEmail } from './mail.js';
+import { makeLimiter } from './rate.js';
 
 const B64 = /^[A-Za-z0-9_-]+$/;
 const isB64 = (s, min, max) => typeof s === 'string' && s.length >= min && s.length <= max && B64.test(s);
@@ -24,6 +25,8 @@ export function sweepInactive(db, days) {
 
 export function campaignRoutes({ router, db, cfg, mail }) {
   const R = (method, pattern, opts, handler) => router.add(method, pattern, opts, handler);
+  // One address gets at most three confirmations a day. Counted in memory only, under a salt that rotates daily: nothing about the address is stored.
+  const perRecipient = makeLimiter({ disabled: cfg.rateLimitDisabled, windowMs: 86_400_000, max: 3 });
   const touch = (id) => db.prepare('UPDATE campaigns SET last_activity_at=? WHERE id=?').run(now(), id);
 
   // A trustee proves who they are by signing a fresh challenge; returns the trustee's index.
@@ -211,6 +214,11 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const b = ctx.body;
     if (!isStr(b.to, 254) || !EMAIL.test(b.to) || !isStr(b.legalName, 120) || !isStr(b.phone, 32) || !isStr(b.employerName, 200)
       || !isStr(b.unionName, 200) || !isStr(b.cardText, 4000) || !isTok(b.disavowToken) || !equal(hashToken(b.disavowToken), card.disavow_token_hash)) fail(400, 'bad_request');
+    // Anyone can start a campaign and sign a card, so this route must not become a way to send mail from this server to arbitrary people:
+    // limit what one address can receive, and how much one campaign can make go out in a day.
+    if (!perRecipient(b.to.toLowerCase())) fail(429, 'too_many_for_this_address');
+    const since = new Date(Date.now() - 86400_000).toISOString();
+    if (db.prepare('SELECT COUNT(*) c FROM cards WHERE campaign_id=? AND confirmation_sent_at > ?').get(card.campaign_id, since).c >= cfg.confirmationsPerCampaignPerDay) fail(429, 'confirmations_capped');
     const email = confirmationEmail({ appName: cfg.appName, baseUrl: cfg.baseUrl, card: b, signedAt: card.created_at, cardId: card.id, disavowToken: b.disavowToken, templateVersion: card.template_version });
     let sent;
     try { sent = await mail.send({ to: b.to, subject: email.subject, text: email.text, replyTo: cfg.replyTo }); } catch { fail(502, 'email_failed'); }
@@ -423,7 +431,7 @@ export function campaignRoutes({ router, db, cfg, mail }) {
       if (enrolledCount(id) !== c.n) fail(409, 'committee_incomplete');
       for (const item of cards) {
         const idx = Array.isArray(item?.sealedShares) ? item.sealedShares.map((s) => s?.trusteeIndex) : [];
-        if (!isUuid(item?.cardId) || item.sealedShares.length !== c.n || !item.sealedShares.every((s) => Number.isInteger(s?.trusteeIndex) && isB64(s.sealed, 60, 300))
+        if (!isUuid(item?.cardId) || !Array.isArray(item.sealedShares) || item.sealedShares.length !== c.n || !item.sealedShares.every((s) => Number.isInteger(s?.trusteeIndex) && isB64(s.sealed, 60, 300))
           || new Set(idx).size !== c.n || idx.some((i) => i < 1 || i > c.n)) fail(400, 'bad_shares');
         const r = db.prepare("UPDATE cards SET sealed_shares=?, seal_mode='shamir' WHERE id=? AND campaign_id=? AND seal_mode='solo'")
           .run(JSON.stringify(item.sealedShares.map((s) => ({ trusteeIndex: s.trusteeIndex, sealed: s.sealed }))), item.cardId, id);

@@ -133,8 +133,11 @@ export function openReport(report, trusteeIndex, boxPublicKey, boxSecretKey) {
 export const GENESIS = 'GENESIS';
 export const sha256Text = (s) => sha256b64(utf8(s));
 export const chainHash = (prev, fields) => sha256b64(utf8(prev + '|' + canonicalJson(fields)));
-// A fingerprint short enough to read aloud: "compare this with a coworker".
-export const fingerprint = (hash) => (hash || '').slice(0, 8).toUpperCase().replace(/[-_]/g, 'X').replace(/(.{4})/, '$1-');
+// A fingerprint short enough to read aloud ("compare this with a coworker") but long enough that nobody can grind out a forged history that shows the
+// same one: 80 bits, as 20 hex digits in groups of four. (The old eight base64 characters, case-folded, were only about 40 bits: hours on a graphics card.)
+export const fingerprint = (hash) => {
+  try { return sodium.to_hex(unb64(hash).subarray(0, 10)).toUpperCase().replace(/(.{4})(?=.)/g, '$1-'); } catch { return ''; }
+};
 
 // ---------- word-based codes ----------
 const word = () => WORDS[sodium.randombytes_uniform(WORDS.length)];
@@ -189,9 +192,21 @@ export async function reshareCard(sealedSolo, founderKeys, trustees, k) {
   return sealed;
 }
 export const openShare = (sealed, boxPublicKey, boxSecretKey) => boxOpen(sealed, boxPublicKey, boxSecretKey);
+// A share is the secret's length plus one byte: the x coordinate. x = 0 would BE the secret (the polynomial's value at zero), so combine() returns
+// whatever bytes a sender puts in an x = 0 "share". Refuse those, wrong lengths, and the same share twice, before combining anything.
+function checkShares(shares, secretLen = 32) {
+  if (!Array.isArray(shares) || shares.length < 2) throw new Error('bad_shares');
+  const xs = new Set();
+  for (const s of shares) {
+    if (!(s instanceof Uint8Array) || s.length !== secretLen + 1 || s[s.length - 1] === 0) throw new Error('bad_shares');
+    xs.add(s[s.length - 1]);
+  }
+  if (xs.size !== shares.length) throw new Error('bad_shares');
+}
 export async function decryptCard({ campaignId, templateVersion, ciphertext, nonce }, shares) {
   let cardKey;
   try {
+    checkShares(shares);
     cardKey = await combine(shares);
     return openJson(cardKey, { nonce, ciphertext }, campaignId + '|' + templateVersion);
   } catch { throw new Error('unlock_failed'); }
@@ -235,7 +250,7 @@ export function castBallot(votePublicKey, optionIndex) {
   const receiptCode = raw.match(/.{4}/g).join('-');
   return { ciphertext, receiptCode, receiptHash: receiptHash(receiptCode) };
 }
-export async function reconstructVoteKey(shares) { const sk = await combine(shares); const out = b64(sk); wipe(sk); return out; }
+export async function reconstructVoteKey(shares) { checkShares(shares); const sk = await combine(shares); const out = b64(sk); wipe(sk); return out; }
 export function countBallots(votePublicKey, voteSecretKey, ballots, nOptions) {
   const counts = Array(nOptions).fill(0); let invalid = 0;
   for (const ct of ballots) {

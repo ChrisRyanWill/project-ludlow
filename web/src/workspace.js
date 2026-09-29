@@ -5,7 +5,8 @@ import { api } from './api.js';
 import { store } from './store.js';
 import { t } from './i18n.js';
 import { packOf } from './packs.js';
-import { verifyChain, auditFields } from '../../shared/verify.js';
+import { verifyChain, auditFields, checkPinned } from '../../shared/verify.js';
+import { plainMd } from './format.js';
 import { ASSIGNABLE_ROLES } from '../../shared/permissions.js';
 import { POLICY_FIELDS } from '../../shared/constants.js';
 import { keyFilePicker, linkTo, label3, loadMeta } from './organize.js';
@@ -118,7 +119,7 @@ function bylawsMd(w) {
   const P = w.policy;
   return `> **DRAFT: REQUIRES REVIEW BY A LICENSED LABOR ATTORNEY BEFORE REAL-WORLD USE**
 
-# Rules of ${w.unionName}
+# Rules of ${plainMd(w.unionName)}
 
 These rules are enforced by the software. They can only be changed by a vote of the members.
 
@@ -152,7 +153,12 @@ export const UnionTab = async () => {
   const comp = can('compliance.read') ? (await wcall('GET', '/api/ws/compliance')).tasks : null;
   const me = WS.info.member;
   const S = { role: 'steward', who: roster?.[0]?.id, csv: '', claims: null, phone: me.phone || '', address: me.address || '', job: me.jobTitle || '', shift: me.shift || '' };
-  const chain = audit ? verifyChain([...audit.entries].reverse(), auditFields, { anchored: audit.entries.length < 500 }) : null;
+  const auditList = audit ? [...audit.entries].reverse() : null;
+  const chain = audit ? verifyChain(auditList, auditFields, { anchored: audit.entries.length < 500 }) : null;
+  // Like the ledger, this device remembers the newest audit entry it has seen, so a rewritten log (which a chain check alone cannot notice) is caught on a later visit.
+  const auditPinKey = `pin.audit.${WS.workspaceId}`, auditPin = store.get(auditPinKey);
+  const auditPinned = chain?.ok ? checkPinned(auditList, auditPin) : { ok: false };
+  if (chain?.ok && auditPinned.ok && chain.head && (!auditPin || chain.head.seq > auditPin.seq)) store.set(auditPinKey, chain.head);
   return wsFrame('union', view((update) => div(
     h1(t('Your union')),
     details({ open: true, class: 'card' }, summary(t('Our rules (bylaws)')), md(bylawsMd(w)),
@@ -190,6 +196,9 @@ export const UnionTab = async () => {
     can('export.all') ? div({ class: 'card' }, h3(t('Your data belongs to the union')), p({ class: 'small muted' }, t('Download everything: members, roles, votes, the whole ledger, rules and the audit log. Private cases stay encrypted, and only the people who hold their keys can read them. The download itself is recorded in the audit log.')),
       btn(t('Export everything (JSON)'), act(async () => { const data = await wcall('GET', '/api/ws/export'); download(`ludlow-export-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2), 'application/json'); toast(t('Exported. This file contains personal information: keep it private.')); }), { kind: 'secondary' })) : null,
     audit ? details({ class: 'card' }, summary(t('Audit log')),
-      chain.ok ? callout('ok', t('Checked in your browser: {n} recent entries form an unbroken chain. Nothing has been changed or removed.', { n: chain.count })) : callout('danger', t('The audit log has been tampered with near entry {n}. Do not trust it.', { n: chain.brokenAt })),
+      !chain.ok ? callout('danger', t('The audit log has been tampered with near entry {n}. Do not trust it.', { n: chain.brokenAt }))
+        : !auditPinned.ok ? callout('danger', strong(t('The history changed.')), ' ', t('On an earlier visit this device saw audit entries that are now different or missing. Someone may have rewritten the log. Tell your members right away.'))
+          : auditPinned.first ? callout('info', t('Checked in your browser: {n} recent entries form an unbroken chain. This is the first check on this device, so it cannot yet tell whether older entries were removed. Later visits will.', { n: chain.count }))
+            : callout('ok', t('Checked in your browser: {n} recent entries form an unbroken chain, and entries this device saw before have not changed.', { n: chain.count })),
       div({ class: 'table-wrap' }, table({ class: 'table small' }, thead(tr(th('#'), th(t('Who')), th(t('What')), th(t('When')))), tbody(audit.entries.slice(0, 100).map((e) => tr(td(e.seq), td(e.actor || '—'), td(e.action), td(ago(e.at)))))))) : null)));
 };

@@ -27,10 +27,11 @@ export async function HelpTab() {
     rec ? div({ class: 'card' }, h2(t('Tell us what happened')),
       callout('info', t('Only the chief steward and the steward who takes your case can read this. Not other officers, and not this website.')),
       field(t('What happened?'), textarea({ rows: 4, oninput: (e) => (F.what = e.target.value) })), field(t('When?'), input({ type: 'date', value: F.when, oninput: (e) => (F.when = e.target.value) })),
-      field(t('Who was involved?'), textInput({ oninput: (e) => (F.who = e.target.value) })), field(t('Contract article (if you know it)'), textInput({ oninput: (e) => (F.article = e.target.value) })),
+      field(t('Who was involved?'), textInput({ oninput: (e) => (F.who = e.target.value) })), field(t('Contract article, number only (if you know it). This one is not encrypted.'), textInput({ oninput: (e) => (F.article = e.target.value) })),
       field(t('What would fix it?'), textInput({ oninput: (e) => (F.desired = e.target.value) })),
       btn(t('Send it, encrypted'), act(async () => {
         if (F.what.trim().length < 5) return toast(t('Please describe what happened.'), 'bad');
+        if (F.article.trim() && !/^[A-Za-z0-9 .§-]{1,20}$/.test(F.article.trim())) return toast(t('Put only the article number there, such as "Art. 12". Everything else belongs in the description, which is encrypted.'), 'bad');
         const ring = await wcall('GET', '/api/ws/keyring?role=chief_steward');
         if (!ring.holders.length) throw new ApiError(409, 'no_chief_steward');
         const id = C.uuid(), key = C.randomBytes(32);

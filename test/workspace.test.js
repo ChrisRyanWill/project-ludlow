@@ -433,6 +433,49 @@ describe('workspace: a vote cannot be opened so briefly that nobody sees it, or 
   });
 });
 
+describe('workspace: smaller fixes from the review', () => {
+  let h, ws;
+  const TEAM = [person('Ofelia Qqqofficer', 0, { roles: ['officer', 'treasurer', 'chief_steward'] }), person('Mona Qqqmember', 1, { location: 'Warehouse B', preferredLanguage: 'Español' }), person('Una Qqqunit', 2, { status: 'unit_employee' })];
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, TEAM); });
+  after(() => h.stop());
+
+  it('a category must be one we defined, not a property every object has', async () => {
+    for (const category of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      assert.equal((await ws.as(0, 'POST', '/api/ws/ledger/receipt', { amountCents: 100, category })).status, 400, category);
+      assert.equal((await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 100, category, payee: 'Somebody' })).status, 400, category);
+    }
+    assert.equal((await ws.as(0, 'POST', '/api/ws/ledger/receipt', { amountCents: 100, category: 'dues' })).status, 200);
+  });
+
+  it('saving your profile keeps the fields the form does not send', async () => {
+    const row = () => h.app.db.prepare('SELECT shift, location, preferred_language pl FROM ws_members WHERE id=?').get(ws.members[1].id);
+    const before = row();
+    assert.deepEqual(before, { shift: 'Day', location: 'Warehouse B', pl: 'Español' });
+    assert.equal((await ws.as(1, 'POST', '/api/ws/me/profile', { phone: '+15550100', address: '1 Main St', jobTitle: 'Barista', shift: 'Day' })).status, 200); // what the form sends
+    assert.deepEqual(row(), before); // location and language survived
+    assert.equal((await ws.as(1, 'POST', '/api/ws/me/profile', { phone: '', address: '', jobTitle: '', shift: 'Night', location: null })).status, 200);
+    assert.deepEqual(row(), { shift: 'Night', location: null, pl: 'Español' }); // what is sent changes; null clears; the rest stays
+  });
+
+  it('a contract article is a short reference; a narrative is refused instead of being stored in the clear', async () => {
+    const file = (articleRef) => {
+      const id = crypto.randomUUID(), k = C.randomBytes(32);
+      return { id, ...C.sealJson(k, { what: 'Zyxwvut concern' }, 'grievance|' + id), ...(articleRef === undefined ? {} : { articleRef }),
+        sealedKeys: { [ws.members[2].id]: C.boxSeal(ws.members[2].keys.boxPublicKey, k), [ws.members[0].id]: C.boxSeal(ws.members[0].keys.boxPublicKey, k) } };
+    };
+    for (const bad of ['supervisor J. Doe told me to sign off on it', 'Art. 12; call him', '<script>', 'x'.repeat(21)]) assert.equal((await ws.as(2, 'POST', '/api/ws/grievances', file(bad))).json.error, 'bad_article', bad);
+    for (const good of ['Art. 12', 'Article 3.2', '§ 4', undefined, '']) assert.equal((await ws.as(2, 'POST', '/api/ws/grievances', file(good))).status, 200, String(good));
+    assert.equal(h.app.db.prepare("SELECT COUNT(*) c FROM ws_grievances WHERE article_ref LIKE '%supervisor%'").get().c, 0);
+  });
+
+  it('a fiscal year cannot start on a day that does not exist', async () => {
+    const start = async (v) => { const w = await makeWorkspace(h, [TEAM[0]], { fiscalYearStart: v }); return h.app.db.prepare('SELECT fiscal_year_start f FROM ws_workspaces WHERE id=?').get(w.wsId).f; };
+    assert.equal(await start('07-01'), '07-01');
+    assert.equal(await start('02-29'), '02-29'); // a leap day is a real day
+    for (const bad of ['02-31', '04-31', '13-01', '00-10', '06-00', '1-1', 'nonsense']) assert.equal(await start(bad), '01-01', bad);
+  });
+});
+
 describe('workspace: officer elections (when the feature flag is on)', () => {
   let h, ws;
   before(async () => { h = await startApp({ onlineOfficerElections: true }); ws = await makeWorkspace(h, PEOPLE); });

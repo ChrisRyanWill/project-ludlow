@@ -60,7 +60,7 @@ export async function TrusteeDashboard() {
     active ? reportsCard(prog.reports, meta, pack, S, update) : null,
     active ? div({ class: 'card' }, h2(t('Open the cards')),
       prog.vouched < prog.releaseMin
-        ? callout('warn', strong(t('The cards are locked.')), ' ', t('{have} of the {need} people needed have signed and been confirmed. Until then nobody can open them, not even all the trustees together.', { have: prog.vouched, need: prog.releaseMin }))
+        ? callout('warn', strong(t('The cards are locked.')), ' ', t('{have} of the {need} people needed have signed and been counted. Until then nobody can open them, not even all the trustees together.', { have: prog.vouched, need: prog.releaseMin }))
         : p(t('The number is met. When you decide together to go public, {k} trustees meet, ideally in person, and open the cards on one device.', { k: raw.k })),
       prog.vouched < prog.releaseMin ? btn(t('Unlock and export'), () => {}, { kind: 'primary', disabled: true }) : linkBtn(t('Unlock and export'), '/t/unlock', 'primary')) : null,
     active ? releaseCard(prog, raw) : null,
@@ -146,7 +146,7 @@ function committeeCard(raw, meta, prog, S, update) {
 function releaseCard(prog, raw) {
   const V = { value: String(prog.releaseMin) };
   return div({ class: 'card' }, h3(t('The lock')),
-    p({ class: 'small muted' }, t('The cards stay sealed until this many people have signed and been confirmed. Any trustee can raise the number. Lowering it takes {k} trustees agreeing on the same number.', { k: raw.k })),
+    p({ class: 'small muted' }, t('The cards stay sealed until this many people have signed and been counted. Any trustee can raise the number. Lowering it takes {k} trustees agreeing on the same number.', { k: raw.k })),
     div({ class: 'row' }, textInput({ type: 'number', min: 1, value: V.value, 'aria-label': t('Number of people'), oninput: (e) => (V.value = e.target.value) }),
       btn(t('Set the number'), act(async () => {
         const r = await tcall(T, 'POST /api/campaigns/:id/release-min', { body: { value: Number(V.value) } });
@@ -200,7 +200,7 @@ export async function UnlockPage() {
       const enough = !!U.raw && U.loaded.length >= 1 && (!hasSolo || U.loaded.includes(1)) && (!hasShamir || U.loaded.length >= U.raw.k);
       const k = U.raw?.k || '?';
       return div(h1(hasSolo && !hasShamir ? t('Founder key') : t('Trustee {i} of {k}', { i: Math.min(U.loaded.length + 1, k), k })),
-        U.blocked ? callout('danger', strong(t('The cards are still locked.')), ' ', t('{have} of the {need} people needed have signed and been confirmed. Nothing can be opened until then, not even by all the trustees together.', U.blocked), p(linkBtn(t('Back to the dashboard'), '/t/dashboard', 'secondary'))) : null,
+        U.blocked ? callout('danger', strong(t('The cards are still locked.')), ' ', t('{have} of the {need} people needed have signed and been counted. Nothing can be opened until then, not even by all the trustees together.', U.blocked), p(linkBtn(t('Back to the dashboard'), '/t/dashboard', 'secondary'))) : null,
         U.meta ? p(t('{union}: {n} signed cards.', { union: U.meta.unionName, n: U.bundle.length })) : null,
         hasSolo ? callout('warn', t('Some cards were signed before your committee was complete, so only trustee 1 can open them. Load trustee 1\'s key file.')) : null,
         U.loaded.length ? callout('ok', t('Contributed so far: trustees {list}.', { list: U.loaded.join(', ') })) : null,

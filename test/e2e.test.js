@@ -189,7 +189,7 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
     await page.getByText(/That code is not right/).waitFor();
     await rows.nth(0).locator('input').fill(vouchB.toLowerCase());
     await rows.nth(0).getByRole('button', { name: 'Confirm' }).click();
-    await page.getByText('Confirmed.', { exact: true }).waitFor(); // exact: the lock's own copy also says "been confirmed."
+    await page.getByText('Confirmed.', { exact: true }).waitFor(); // exact: other copy on the page also mentions confirmation
     await page.waitForFunction(() => document.querySelectorAll('.vouch').length === 1);
     // the lock is enforced: only 2 of the 3 people needed are confirmed, so even the founder is handed nothing to open
     await page.goto('/t/unlock');
@@ -402,7 +402,7 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
     const dan = pages['ws-Dan'];
     await nav(dan, 'Votes');
     await dan.getByRole('link', { name: 'Set our monthly dues' }).click();
-    await dan.getByText(/Your ballot is in the list of counted ballots/).waitFor();
+    await dan.getByText(/Your receipt is in the list, so your vote was recorded/).waitFor();
     assert.deepEqual(problems, []);
   });
 

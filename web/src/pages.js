@@ -72,5 +72,5 @@ export function VerifyPage() {
     h1(t('Verify this software')),
     p(t('The biggest risk in any web app is a server that quietly sends you different code. You can protect yourself by comparing the fingerprint of the code you are running with the one published for the release, and by comparing with your fellow trustees before you open cards.')),
     div({ class: 'card' }, out, field(t('Published fingerprint'), known), btn(t('Compare'), compare, { kind: 'primary' })),
-    callout('warn', t('Honest limits: this check cannot catch a server that shows different code to different visitors. That is why trustees should also compare the fingerprint with each other, and why you can run your own copy of the server.'))));
+    callout('warn', t('Honest limits: this page downloads the code again to work out its fingerprint. A server determined to cheat could show this page one file and run another, or show different code to different people. So this is a check against mistakes and casual tampering, not against a hostile server. The strongest check is to compare with a fingerprint you built yourself from the source, or one that someone you trust worked out on another device and network. That is also why you can run your own copy of the server.'))));
 }

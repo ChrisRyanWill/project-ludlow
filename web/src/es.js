@@ -19,7 +19,7 @@ export default {
   'How it works': 'Cómo funciona',
   'A few trusted coworkers become trustees.': 'Unos pocos compañeros de confianza se convierten en custodios de las llaves.',
   'You can start alone and add them as you go. Once your committee is complete, any group of them, for example 3 of 5, can open the cards, and only after enough people have signed. No one alone can.': 'Puedes empezar solo y agregarlos poco a poco. Cuando tu comité esté completo, cualquier grupo de ellos, por ejemplo 3 de 5, podrá abrir las tarjetas, y solo después de que firmen suficientes personas. Nadie puede hacerlo solo.',
-  'Your card stays sealed. Until at least {n} people have signed and been confirmed, nobody can open it: not the trustees, and not this website.': 'Tu tarjeta permanece sellada. Hasta que al menos {n} personas hayan firmado y sido confirmadas, nadie puede abrirla: ni los custodios, ni este sitio web.',
+  'Your card stays sealed. Until at least {n} people have signed and been counted, nobody can open it: not the trustees, and not this website.': 'Tu tarjeta permanece sellada. Hasta que al menos {n} personas hayan firmado y sido contadas, nadie puede abrirla: ni los custodios, ni este sitio web.',
   'Coworkers sign on their own phones.': 'Los compañeros firman en sus propios teléfonos.',
   'Each card is locked on the phone before it is sent. This website only ever sees scrambled data.': 'Cada tarjeta se cifra en el teléfono antes de enviarse. Este sitio web solo ve datos codificados.',
   'You decide when to go public.': 'Ustedes deciden cuándo hacerlo público.',
