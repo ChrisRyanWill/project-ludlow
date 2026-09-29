@@ -144,6 +144,15 @@ export const normalizeCode = (c) => String(c).trim().toUpperCase().replace(/[\s_
 export const vouchHash = (cardId, code) => sha256b64(utf8('vouch|' + cardId + '|' + normalizeCode(code)));
 export const passphraseOk = (p) => typeof p === 'string' && (p.length >= 14 || p.trim().split(/[\s-]+/).length >= 4 && p.length >= 12);
 
+// Words that stand for a public key, so two people can check it aloud ("read me the words on your screen"). They identify a key and are
+// not secret. The list has 205 words (about 7.7 bits each), so ten words are about 77 bits: enough that nobody can grind out a different
+// key that shows the same words. Fewer would not be, which is why this is not the 6-word passphrase length.
+export const keyWords = (publicKeyB64) => {
+  if (typeof publicKeyB64 !== 'string' || publicKeyB64.length < 20) throw new Error('keyWords needs a public key'); // never let a missing key "match" another missing key
+  const h = sodium.crypto_hash_sha256(utf8('ludlow key words v1|' + publicKeyB64));
+  return Array.from({ length: 10 }, (_, i) => WORDS[((h[3 * i] << 16) | (h[3 * i + 1] << 8) | h[3 * i + 2]) % WORDS.length]).join('-');
+};
+
 // ---------- card encryption (Section 5.2 of the spec) ----------
 export async function encryptCard({ campaignId, templateVersion, payload, trustees, k }) {
   const cardKey = randomBytes(32);

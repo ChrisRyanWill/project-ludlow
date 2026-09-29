@@ -32,7 +32,8 @@ describe('campaign: zero-knowledge authorization cards', () => {
     const k = C.newKeypairs();
     const e = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: id, enrollToken: tok[0], boxPublicKey: k.boxPublicKey, signPublicKey: k.signPublicKey } });
     assert.deepEqual([e.json.enrolledCount, e.json.status, e.json.committeeComplete], [1, 'active', false]); // the founder alone is enough to start collecting cards
-    const e2 = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: id, enrollToken: tok[1], boxPublicKey: k.boxPublicKey, signPublicKey: C.newKeypairs().signPublicKey } });
+    const k2 = C.newKeypairs(); // a second trustee is a second person with their own keys
+    const e2 = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: id, enrollToken: tok[1], boxPublicKey: k2.boxPublicKey, signPublicKey: k2.signPublicKey } });
     assert.deepEqual([e2.json.enrolledCount, e2.json.committeeComplete], [2, true]);
     assert.equal((await h.call('POST', '/api/trustees/enroll', { body: { campaignId: id, enrollToken: tok[0], boxPublicKey: k.boxPublicKey, signPublicKey: k.signPublicKey } })).status, 401); // token is single-use
   });
@@ -311,6 +312,31 @@ describe('campaign: one person can start alone and add the committee later', () 
     assert.equal((await enrollTrustee(h, camp, 2, fresh)).r.status, 200);
     assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/trustees/reset`, { auth: await tAuth(1, 'POST /api/campaigns/:id/trustees/reset'), body: { index: 2, tokenHash: C.hashToken(C.newToken()) } })).json.error, 'slot_taken'); // a taken seat cannot be reset
     assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/committee`, { auth: await tAuth(2, 'POST /api/campaigns/:id/committee'), body: { n: 3, k: 2 } })).json.error, 'founder_only');
+  });
+
+  it('only the founder hands out seats: a trustee cannot re-issue an empty seat to take it (which would let one person hold k shares)', async () => {
+    const before = h.app.db.prepare('SELECT enrollment_token_hash h FROM trustees WHERE campaign_id=? AND trustee_index=3').get(camp.id).h;
+    const rogue = await h.call('POST', `/api/campaigns/${camp.id}/trustees/reset`, { auth: await tAuth(2, 'POST /api/campaigns/:id/trustees/reset'), body: { index: 3, tokenHash: C.hashToken(C.newToken()) } });
+    assert.equal(rogue.status, 403);
+    assert.equal(rogue.json.error, 'founder_only');
+    // nothing changed: the link the founder gave the real third trustee is still the only one that works
+    assert.equal(h.app.db.prepare('SELECT enrollment_token_hash h FROM trustees WHERE campaign_id=? AND trustee_index=3').get(camp.id).h, before);
+    // and without any trustee credentials at all it is refused too
+    assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/trustees/reset`, { body: { index: 3, tokenHash: C.hashToken(C.newToken()) } })).status, 401);
+  });
+
+  it('the same keys cannot fill two seats, and a refused attempt leaves the seat open for the real person', async () => {
+    const c2 = await makeCampaign(h, { n: 3, k: 2, enroll: 1 });
+    const founderKeys = c2.trustees[0].keys;
+    const reuse = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: c2.id, enrollToken: c2.enrollTokens[1], boxPublicKey: founderKeys.boxPublicKey, signPublicKey: founderKeys.signPublicKey } });
+    assert.equal(reuse.status, 409);
+    assert.equal(reuse.json.error, 'key_reused');
+    // reusing just one of the two keys is refused as well
+    const half = C.newKeypairs();
+    const halfReuse = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: c2.id, enrollToken: c2.enrollTokens[1], boxPublicKey: half.boxPublicKey, signPublicKey: founderKeys.signPublicKey } });
+    assert.equal(halfReuse.json.error, 'key_reused');
+    // the seat is still open, and the real second trustee, with their own keys, can take it with the same link
+    assert.equal((await enrollTrustee(h, c2, 2)).r.status, 200);
   });
 
   it('when everyone has joined, new cards are k-of-n, and the founder locks the early ones to the committee', async () => {

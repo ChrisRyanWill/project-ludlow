@@ -92,9 +92,21 @@ function committeeCard(raw, meta, prog, S, update) {
   const joined = raw.trustees.filter((x) => x.enrolled).length, complete = joined === raw.n, founder = T.index === 1;
   const nm = (i) => meta.trusteeNames.find((x) => x.index === i)?.displayName || t('Trustee {n}', { n: i });
   const P = (S.plan ||= { n: raw.n, k: raw.k });
+  // The trustees' public keys come from the server. Before locking cards to them, the founder checks each trustee's key words aloud (the trustee
+  // reads them off their own screen), so a swapped key, or a seat taken by the wrong person, can never receive a share. A key that changes after
+  // the tick no longer counts as checked.
+  const words = (x) => C.keyWords(x.boxPublicKey);
+  const checked = (x) => S.checked?.[x.index] === words(x);
+  const allChecked = raw.trustees.every((x) => !x.enrolled || x.index === T.index || checked(x));
+  const keyCheck = (x) => div({ class: 'keycheck' },
+    p({ class: 'small muted' }, t('Ask {name} to read you the key words on their own screen.', { name: nm(x.index) })),
+    div({ class: 'keywords', lang: 'en' }, words(x)),
+    label3(t('These match what {name} read to me', { name: nm(x.index) }), checked(x), (v) => { (S.checked ||= {})[x.index] = v ? words(x) : null; update(); }));
   const lock = async () => {
+    if (!allChecked) return toast(t('First check each trustee\'s key words with them.'), 'bad');
     const { cards } = await tcall(T, 'GET /api/campaigns/:id/reshare-bundle');
     const trustees = raw.trustees.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey }));
+    if (trustees.length !== raw.n || trustees.some((x) => !x.boxPublicKey)) return toast(t('The committee is not complete yet.'), 'bad');
     const out = [];
     for (const c of cards) out.push({ cardId: c.id, sealedShares: await C.reshareCard(c.sealedShares.find((s) => s.trusteeIndex === T.index).sealed, T.keys, trustees, raw.k) });
     for (let i = 0; i < out.length; i += 200) await tcall(T, 'POST /api/campaigns/:id/reshare', { body: { cards: out.slice(i, i + 200) } });
@@ -106,15 +118,21 @@ function committeeCard(raw, meta, prog, S, update) {
       ? (prog.solo ? callout('warn', strong(t('Everyone has joined. Now lock your early cards to the committee.')), ' ', t('{n} card(s) are still sealed to the founder alone.', { n: prog.solo }))
         : callout('ok', t('Any {k} of {n} trustees together can open the cards.', { k: raw.k, n: raw.n })))
       : callout('warn', strong(t('Only trustee 1 can open the cards right now.')), ' ', t('Invite the other trustees below. When all {n} have joined, lock the cards to the committee so that {k} of them are needed.', { n: raw.n, k: raw.k })),
+    T.keys?.boxPublicKey ? div({ class: 'keycheck' }, strong(t('Your key words')),
+      p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the cards are locked to the committee, so nobody can slip in a different key.')),
+      div({ class: 'keywords', lang: 'en' }, C.keyWords(T.keys.boxPublicKey))) : null,
     ul(raw.trustees.map((x) => li(strong(nm(x.index)), x.index === T.index ? ' ' + t('(you)') : '', ' ',
-      x.enrolled ? badge(t('joined'), 'ok') : [badge(t('not joined yet'), 'warn'), ' ', btn(t('Get invite link'), act(async () => {
-        const token = C.newToken();
-        await tcall(T, 'POST /api/campaigns/:id/trustees/reset', { body: { index: x.index, tokenHash: C.hashToken(token) } }); // any older link for this seat stops working
-        S.slotLinks[x.index] = linkTo('/t', { e: token, k: T.campaignKey, c: T.campaignId });
-        update();
-      }), { kind: 'secondary small' })],
+      x.enrolled ? [badge(t('joined'), 'ok'), founder && x.index !== T.index ? keyCheck(x) : null]
+        : [badge(t('not joined yet'), 'warn'), ' ', founder ? btn(t('Get invite link'), act(async () => { // only the founder hands out seats
+          const token = C.newToken();
+          await tcall(T, 'POST /api/campaigns/:id/trustees/reset', { body: { index: x.index, tokenHash: C.hashToken(token) } }); // any older link for this seat stops working
+          S.slotLinks[x.index] = linkTo('/t', { e: token, k: T.campaignKey, c: T.campaignId });
+          update();
+        }), { kind: 'secondary small' }) : span({ class: 'small muted' }, t('Trustee 1 sends this invitation.'))],
       S.slotLinks[x.index] ? trusteeInvite(S.slotLinks[x.index], nm(x.index), meta) : null))),
-    complete && prog.solo && founder ? btn(t('Lock {n} existing card(s) to the committee', { n: prog.solo }), act(lock), { kind: 'primary' }) : null,
+    complete && prog.solo && founder ? div(
+      allChecked ? null : p({ class: 'small muted' }, t('First check each trustee\'s key words with them, above.')),
+      btn(t('Lock {n} existing card(s) to the committee', { n: prog.solo }), act(lock), { kind: 'primary', disabled: !allChecked })) : null,
     complete && prog.solo && !founder ? p({ class: 'small muted' }, t('Only trustee 1 holds the keys to these cards, so trustee 1 does this step.')) : null,
     !complete && founder ? details(summary(t('Change the plan')),
       p({ class: 'small muted' }, t('You can change how many trustees you plan to have, and how many must be together to open the cards, until everyone has joined.')),

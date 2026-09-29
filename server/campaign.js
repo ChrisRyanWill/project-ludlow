@@ -98,6 +98,9 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     return db.transaction(() => {
       const t = db.prepare('SELECT id, trustee_index i FROM trustees WHERE campaign_id=? AND enrollment_token_hash=?').get(b.campaignId, hashToken(b.enrollToken));
       if (!t) fail(401, 'unauthorized');
+      // The same keys can never fill two seats. This is only a cheap guard (someone can still make a second key file), which is why the
+      // founder also confirms each seat's key words with the person before locking cards to the committee.
+      if (db.prepare('SELECT 1 FROM trustees WHERE campaign_id=? AND enrolled_at IS NOT NULL AND (box_public_key=? OR sign_public_key=?)').get(b.campaignId, b.boxPublicKey, b.signPublicKey)) fail(409, 'key_reused');
       db.prepare('UPDATE trustees SET box_public_key=?, sign_public_key=?, enrolled_at=?, enrollment_token_hash=NULL WHERE id=?').run(b.boxPublicKey, b.signPublicKey, now(), t.id);
       // The founder's key is enough to start collecting cards; the rest of the committee can join later.
       if (db.prepare('SELECT 1 FROM trustees WHERE campaign_id=? AND trustee_index=1 AND enrolled_at IS NOT NULL').get(b.campaignId)) {
@@ -392,7 +395,9 @@ export function campaignRoutes({ router, db, cfg, mail }) {
   // A fresh invitation for a trustee seat that has not been taken (also revokes any earlier, possibly leaked, link).
   R('POST', '/api/campaigns/:id/trustees/reset', { strict: true }, (ctx) => {
     const id = ctx.params.id;
-    authTrustee(ctx, 'POST /api/campaigns/:id/trustees/reset', id);
+    // Seats are the founder's to hand out. If any trustee could re-issue an empty seat, one person could take enough seats to hold k shares
+    // alone (and approve lowering the release number k times), which would defeat both the k-of-n rule and the release lock.
+    if (authTrustee(ctx, 'POST /api/campaigns/:id/trustees/reset', id) !== 1) fail(403, 'founder_only');
     const { index, tokenHash } = ctx.body;
     if (!Number.isInteger(index) || !isTok(tokenHash)) fail(400, 'bad_request');
     const r = db.prepare('UPDATE trustees SET enrollment_token_hash=? WHERE campaign_id=? AND trustee_index=? AND enrolled_at IS NULL').run(tokenHash, id, index);

@@ -235,3 +235,18 @@ test('frontend hygiene: every UI helper a page calls is imported or defined ther
     assert.deepEqual(missing, [], `${f} uses helpers it never imports`);
   }
 });
+
+test('key words: ten words that identify a public key, stable, distinct, and they refuse a missing key', () => {
+  const a = C.newKeypairs().boxPublicKey, b = C.newKeypairs().boxPublicKey;
+  const w = C.keyWords(a);
+  assert.equal(w, C.keyWords(a)); // stable: two people computing it independently see the same words
+  const parts = w.split('-');
+  assert.equal(parts.length, 10);
+  assert.ok(parts.every((p) => WORDS.includes(p)));
+  assert.notEqual(w, C.keyWords(b));
+  assert.notEqual(w, C.keyWords(flip(a))); // changing one character of the key changes the words
+  for (const bad of [null, undefined, '', 'short', 42]) assert.throws(() => C.keyWords(bad)); // two missing keys must never "match"
+  const seen = new Set();
+  for (let i = 0; i < 300; i++) seen.add(C.keyWords(C.newKeypairs().boxPublicKey));
+  assert.equal(seen.size, 300);
+});
