@@ -130,6 +130,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand); }
 /* links, codes, entries */
 .link-box { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .85rem; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; padding: .6rem .7rem; overflow-wrap: anywhere; user-select: all; margin: .6rem 0; }
 .passphrase { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 1.15rem; font-weight: 700; background: var(--brand-soft); border: 1px dashed var(--brand); border-radius: 8px; padding: .8rem; overflow-wrap: anywhere; margin: .6rem 0; }
+.keycheck { margin: .8rem 0; padding: .7rem .9rem; border-left: 4px solid var(--gold-strong); background: var(--sunken); border-radius: 0 8px 8px 0; } .keycheck p { margin: .3rem 0; } .keycheck .check { margin-top: .5rem; }
+.keywords { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 1.05rem; font-weight: 700; line-height: 1.7; letter-spacing: .02em; background: var(--card); border: 1px solid var(--line-strong); border-radius: 8px; padding: .55rem .75rem; overflow-wrap: anywhere; user-select: all; margin: .35rem 0; }
 .code { font-family: var(--serif); font-size: 2.2rem; font-weight: 800; letter-spacing: .08em; text-align: center; padding: .6rem; background: var(--card); border: 2px solid var(--gold-strong); border-radius: 8px; margin: .8rem 0; overflow-wrap: anywhere; } .code.small { font-size: 1.15rem; }
 .entry { border-top: 1px solid var(--line); padding: .8rem 0; } .entry:first-of-type { border-top: 0; }
 .vouch span { flex: 1 1 10rem; } .vouch input { flex: 1 1 9rem; text-transform: uppercase; }

@@ -60,7 +60,7 @@ export async function TrusteeDashboard() {
     active ? reportsCard(prog.reports, meta, pack, S, update) : null,
     active ? div({ class: 'card' }, h2(t('Open the cards')),
       prog.vouched < prog.releaseMin
-        ? callout('warn', strong(t('The cards are locked.')), ' ', t('{have} of the {need} people needed have signed and been confirmed. Until then nobody can open them, not even all the trustees together.', { have: prog.vouched, need: prog.releaseMin }))
+        ? callout('warn', strong(t('The cards are locked.')), ' ', t('{have} of the {need} people needed have signed and been counted. Until then nobody can open them, not even all the trustees together.', { have: prog.vouched, need: prog.releaseMin }))
         : p(t('The number is met. When you decide together to go public, {k} trustees meet, ideally in person, and open the cards on one device.', { k: raw.k })),
       prog.vouched < prog.releaseMin ? btn(t('Unlock and export'), () => {}, { kind: 'primary', disabled: true }) : linkBtn(t('Unlock and export'), '/t/unlock', 'primary')) : null,
     active ? releaseCard(prog, raw) : null,
@@ -92,9 +92,21 @@ function committeeCard(raw, meta, prog, S, update) {
   const joined = raw.trustees.filter((x) => x.enrolled).length, complete = joined === raw.n, founder = T.index === 1;
   const nm = (i) => meta.trusteeNames.find((x) => x.index === i)?.displayName || t('Trustee {n}', { n: i });
   const P = (S.plan ||= { n: raw.n, k: raw.k });
+  // The trustees' public keys come from the server. Before locking cards to them, the founder checks each trustee's key words aloud (the trustee
+  // reads them off their own screen), so a swapped key, or a seat taken by the wrong person, can never receive a share. A key that changes after
+  // the tick no longer counts as checked.
+  const words = (x) => C.keyWords(x.boxPublicKey);
+  const checked = (x) => S.checked?.[x.index] === words(x);
+  const allChecked = raw.trustees.every((x) => !x.enrolled || x.index === T.index || checked(x));
+  const keyCheck = (x) => div({ class: 'keycheck' },
+    p({ class: 'small muted' }, t('Ask {name} to read you the key words on their own screen.', { name: nm(x.index) })),
+    div({ class: 'keywords', lang: 'en' }, words(x)),
+    label3(t('These match what {name} read to me', { name: nm(x.index) }), checked(x), (v) => { (S.checked ||= {})[x.index] = v ? words(x) : null; update(); }));
   const lock = async () => {
+    if (!allChecked) return toast(t('First check each trustee\'s key words with them.'), 'bad');
     const { cards } = await tcall(T, 'GET /api/campaigns/:id/reshare-bundle');
     const trustees = raw.trustees.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey }));
+    if (trustees.length !== raw.n || trustees.some((x) => !x.boxPublicKey)) return toast(t('The committee is not complete yet.'), 'bad');
     const out = [];
     for (const c of cards) out.push({ cardId: c.id, sealedShares: await C.reshareCard(c.sealedShares.find((s) => s.trusteeIndex === T.index).sealed, T.keys, trustees, raw.k) });
     for (let i = 0; i < out.length; i += 200) await tcall(T, 'POST /api/campaigns/:id/reshare', { body: { cards: out.slice(i, i + 200) } });
@@ -106,15 +118,21 @@ function committeeCard(raw, meta, prog, S, update) {
       ? (prog.solo ? callout('warn', strong(t('Everyone has joined. Now lock your early cards to the committee.')), ' ', t('{n} card(s) are still sealed to the founder alone.', { n: prog.solo }))
         : callout('ok', t('Any {k} of {n} trustees together can open the cards.', { k: raw.k, n: raw.n })))
       : callout('warn', strong(t('Only trustee 1 can open the cards right now.')), ' ', t('Invite the other trustees below. When all {n} have joined, lock the cards to the committee so that {k} of them are needed.', { n: raw.n, k: raw.k })),
+    T.keys?.boxPublicKey ? div({ class: 'keycheck' }, strong(t('Your key words')),
+      p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the cards are locked to the committee, so nobody can slip in a different key.')),
+      div({ class: 'keywords', lang: 'en' }, C.keyWords(T.keys.boxPublicKey))) : null,
     ul(raw.trustees.map((x) => li(strong(nm(x.index)), x.index === T.index ? ' ' + t('(you)') : '', ' ',
-      x.enrolled ? badge(t('joined'), 'ok') : [badge(t('not joined yet'), 'warn'), ' ', btn(t('Get invite link'), act(async () => {
-        const token = C.newToken();
-        await tcall(T, 'POST /api/campaigns/:id/trustees/reset', { body: { index: x.index, tokenHash: C.hashToken(token) } }); // any older link for this seat stops working
-        S.slotLinks[x.index] = linkTo('/t', { e: token, k: T.campaignKey, c: T.campaignId });
-        update();
-      }), { kind: 'secondary small' })],
+      x.enrolled ? [badge(t('joined'), 'ok'), founder && x.index !== T.index ? keyCheck(x) : null]
+        : [badge(t('not joined yet'), 'warn'), ' ', founder ? btn(t('Get invite link'), act(async () => { // only the founder hands out seats
+          const token = C.newToken();
+          await tcall(T, 'POST /api/campaigns/:id/trustees/reset', { body: { index: x.index, tokenHash: C.hashToken(token) } }); // any older link for this seat stops working
+          S.slotLinks[x.index] = linkTo('/t', { e: token, k: T.campaignKey, c: T.campaignId });
+          update();
+        }), { kind: 'secondary small' }) : span({ class: 'small muted' }, t('Trustee 1 sends this invitation.'))],
       S.slotLinks[x.index] ? trusteeInvite(S.slotLinks[x.index], nm(x.index), meta) : null))),
-    complete && prog.solo && founder ? btn(t('Lock {n} existing card(s) to the committee', { n: prog.solo }), act(lock), { kind: 'primary' }) : null,
+    complete && prog.solo && founder ? div(
+      allChecked ? null : p({ class: 'small muted' }, t('First check each trustee\'s key words with them, above.')),
+      btn(t('Lock {n} existing card(s) to the committee', { n: prog.solo }), act(lock), { kind: 'primary', disabled: !allChecked })) : null,
     complete && prog.solo && !founder ? p({ class: 'small muted' }, t('Only trustee 1 holds the keys to these cards, so trustee 1 does this step.')) : null,
     !complete && founder ? details(summary(t('Change the plan')),
       p({ class: 'small muted' }, t('You can change how many trustees you plan to have, and how many must be together to open the cards, until everyone has joined.')),
@@ -128,7 +146,7 @@ function committeeCard(raw, meta, prog, S, update) {
 function releaseCard(prog, raw) {
   const V = { value: String(prog.releaseMin) };
   return div({ class: 'card' }, h3(t('The lock')),
-    p({ class: 'small muted' }, t('The cards stay sealed until this many people have signed and been confirmed. Any trustee can raise the number. Lowering it takes {k} trustees agreeing on the same number.', { k: raw.k })),
+    p({ class: 'small muted' }, t('The cards stay sealed until this many people have signed and been counted. Any trustee can raise the number. Lowering it takes {k} trustees agreeing on the same number.', { k: raw.k })),
     div({ class: 'row' }, textInput({ type: 'number', min: 1, value: V.value, 'aria-label': t('Number of people'), oninput: (e) => (V.value = e.target.value) }),
       btn(t('Set the number'), act(async () => {
         const r = await tcall(T, 'POST /api/campaigns/:id/release-min', { body: { value: Number(V.value) } });
@@ -182,7 +200,7 @@ export async function UnlockPage() {
       const enough = !!U.raw && U.loaded.length >= 1 && (!hasSolo || U.loaded.includes(1)) && (!hasShamir || U.loaded.length >= U.raw.k);
       const k = U.raw?.k || '?';
       return div(h1(hasSolo && !hasShamir ? t('Founder key') : t('Trustee {i} of {k}', { i: Math.min(U.loaded.length + 1, k), k })),
-        U.blocked ? callout('danger', strong(t('The cards are still locked.')), ' ', t('{have} of the {need} people needed have signed and been confirmed. Nothing can be opened until then, not even by all the trustees together.', U.blocked), p(linkBtn(t('Back to the dashboard'), '/t/dashboard', 'secondary'))) : null,
+        U.blocked ? callout('danger', strong(t('The cards are still locked.')), ' ', t('{have} of the {need} people needed have signed and been counted. Nothing can be opened until then, not even by all the trustees together.', U.blocked), p(linkBtn(t('Back to the dashboard'), '/t/dashboard', 'secondary'))) : null,
         U.meta ? p(t('{union}: {n} signed cards.', { union: U.meta.unionName, n: U.bundle.length })) : null,
         hasSolo ? callout('warn', t('Some cards were signed before your committee was complete, so only trustee 1 can open them. Load trustee 1\'s key file.')) : null,
         U.loaded.length ? callout('ok', t('Contributed so far: trustees {list}.', { list: U.loaded.join(', ') })) : null,

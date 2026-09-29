@@ -1,6 +1,6 @@
 // Envelope encryption for workspace personal data (V2 rule 2). Each workspace has a random data key,
 // wrapped by the master key (WORKSPACE_MASTER_KEY; later a cloud KMS). Personal fields are stored only
-// as ciphertext, so a database dump alone reveals nothing. End-to-end records (grievances) never use
+// as ciphertext, so a database dump alone does not reveal them. (Columns that are NOT encrypted, such as shift, location, membership status, who voted and who filed a case, are listed in docs/THREAT_MODEL.md.) End-to-end records (grievances) never use
 // this: the server holds no key that opens them.
 import fs from 'node:fs';
 import path from 'node:path';

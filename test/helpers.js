@@ -13,7 +13,7 @@ export async function startApp(over = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'ludlow-'));
   const logs = [];
   setLogSink((l) => logs.push(l));
-  const app = await createApp({ dbPath: path.join(dir, 'test.db'), masterKey: C.b64(C.randomBytes(32)), rateLimitDisabled: true, emailProvider: 'dev', ...over });
+  const app = await createApp({ dbPath: path.join(dir, 'test.db'), masterKey: C.b64(C.randomBytes(32)), rateLimitDisabled: true, emailProvider: 'dev', minVoteHours: 0, ...over }); // minVoteHours 0: tests open votes that close in an hour, not a day
   const port = await app.listen(0, '127.0.0.1');
   const base = `http://127.0.0.1:${port}`;
   async function call(method, url, { body, auth } = {}) {
@@ -105,9 +105,9 @@ export async function login(h, m) {
   return m;
 }
 
-export async function makeWorkspace(h, people, { stage = 'recognized' } = {}) {
+export async function makeWorkspace(h, people, { stage = 'recognized', fiscalYearStart } = {}) {
   const claims = people.map(() => C.newToken());
-  const r = await h.call('POST', '/api/ws', { body: { confirmedPublic: true, stage, unionName: 'Leakcheck Workers United', employerName: 'Leakcheck Industries LLC', jurisdiction: 'us-nlra', members: people.map((p, i) => ({ ...p, legalName: p.name, claimTokenHash: C.hashToken(claims[i]), status: p.status ?? 'member' })) } });
+  const r = await h.call('POST', '/api/ws', { body: { confirmedPublic: true, stage, ...(fiscalYearStart ? { fiscalYearStart } : {}), unionName: 'Leakcheck Workers United', employerName: 'Leakcheck Industries LLC', jurisdiction: 'us-nlra', members: people.map((p, i) => ({ ...p, legalName: p.name, claimTokenHash: C.hashToken(claims[i]), status: p.status ?? 'member' })) } });
   if (r.status !== 200) throw new Error('create workspace failed: ' + JSON.stringify(r.json));
   const wsId = r.json.workspaceId;
   const members = [];
@@ -118,5 +118,5 @@ export async function makeWorkspace(h, people, { stage = 'recognized' } = {}) {
     members.push(await login(h, { id: c.json.memberId, keys, ...people[i] }));
   }
   const as = (i, method, url, body) => h.call(method, url, { body, auth: members[i].auth });
-  return { wsId, members, as };
+  return { wsId, members, as, h };
 }

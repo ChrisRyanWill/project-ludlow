@@ -23,9 +23,12 @@ export function loadConfig(env = process.env, overrides = {}) {
     directTtlDays: Number(env.DIRECT_INVITE_TTL_DAYS) || 7,
     masterKey: env.WORKSPACE_MASTER_KEY || '',
     onlineOfficerElections: env.ONLINE_OFFICER_ELECTIONS === 'true',
+    // The shortest a vote may stay open. Members need real time to see it; a few seconds would let it close unseen (0 turns the rule off, for tests).
+    minVoteHours: env.MIN_VOTE_HOURS != null && env.MIN_VOTE_HOURS !== '' && Number.isFinite(Number(env.MIN_VOTE_HOURS)) ? Math.max(0, Number(env.MIN_VOTE_HOURS)) : 24,
     sessionIdleHours: Number(env.SESSION_IDLE_HOURS) || 12,
     sessionMaxDays: Number(env.SESSION_MAX_DAYS) || 30,
-    trustProxy: env.TRUST_PROXY === '1',
+    trustProxy: Number(env.TRUST_PROXY) > 0 ? Math.floor(Number(env.TRUST_PROXY)) : 0, // how many reverse proxies sit in front (1 for Caddy or nginx)
+    confirmationsPerCampaignPerDay: Number(env.CONFIRMATIONS_PER_CAMPAIGN_PER_DAY) || 2000, // caps how much mail a single campaign can make this server send
     rateLimitDisabled: env.RATE_LIMIT_DISABLED === '1',
     rateStrictPerMin: Number(env.RATE_STRICT_PER_MIN) || 90, // sensitive routes per client per minute; 3 calls per signer, and groups often share one Wi-Fi
     ...overrides,

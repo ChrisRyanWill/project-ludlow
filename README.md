@@ -16,7 +16,7 @@
 
 Project Ludlow is an open-source platform that takes a group of workers from "we should organize" to "we run our own union", in two halves:
 
-1. **Organize.** Coworkers sign electronic authorization cards on their own phones. Each card is encrypted *in the browser* with a key split among a few trusted trustees, so **no one, not even the server, can read a card** until `k` of `n` trustees open them together. Cards from group links only count once a coworker confirms the signer in person. When the committee decides to go public, the browser builds the filing package locally: roster, cards, declaration, letters, worksheets.
+1. **Organize.** Coworkers sign electronic authorization cards on their own phones. Each card is encrypted *in the browser* with a key split among a few trusted trustees, so the server only ever holds ciphertext and, once the committee is complete, **no one person can read a card**: it takes `k` of `n` trustees together. (Two honest caveats: until the committee has joined, the founder holds the only key, and a server that lies about which keys belong to the trustees could receive new cards. See the [threat model](docs/THREAT_MODEL.md).) Cards from group links only count once a coworker confirms the signer in person. When the committee decides to go public, the browser builds the filing package locally: roster, cards, declaration, letters, worksheets.
 2. **Run.** Once the union is public it gets a workspace with secret-ballot votes, workplace cases, money, rules and deadlines, all built so that **every member can check the work**, not just trust the officers.
 
 > Nothing here files anything, contacts an employer, or talks to an agency. It prepares drafts for people. Every legal text carries `DRAFT — REQUIRES REVIEW BY A LICENSED LABOR ATTORNEY`.
@@ -47,7 +47,7 @@ Data lives in `./data/ludlow.db` (one SQLite file). In development the confirmat
 | **Legal by design** | Cards carry every field NLRB GC 15-08 requires; a Confirmation Transmission is emailed (and then forgotten); disavow link; declaration, demand letter, petition worksheet generated from templates. The letter **refuses to claim a majority** the numbers do not show. |
 | **Any country** | *Jurisdiction packs* make the legal layer data: US (NLRA), UK (CAC), and a general pack where trustees enter their local threshold. Adding a country is content, not code. |
 | **Retaliation shield** | Each signer keeps a private, encrypted record of anything that looks like punishment for organizing (with a filing-deadline clock), and can share one entry with the committee, sealed to every trustee and unlinked from their card. |
-| **Verifiable democracy** | Secret ballots with no link between voter and ballot; the committee counts in a browser; **any member can recount** and check their receipt; concurrent double votes are impossible. |
+| **Verifiable democracy** | Secret ballots stored with no voter reference or timestamp (and re-shuffled on every cast, so the order is not left on disk); the committee counts in a browser; a decision that changes dues, rules or roles is always counted in the open and carries itself out; **any member can recount** the published ballots and check their receipt (that shows the numbers match the stored ballots, not that none were swapped); concurrent double votes are impossible. |
 | **Bylaws that execute themselves** | A vote that passes *changes reality*: dues, rule changes, removing an officer from a role. Members can force a vote or a recall by petition. Spending needs two officers; nobody approves their own request. |
 | **Every member is an auditor** | The ledger and audit log are hash chains. Each browser re-checks the chain and remembers the newest entry it saw, so rewritten history is caught. Ledger rows cannot be edited even by SQL (triggers). |
 | **Fair representation, enforced** | A case cannot close without a decision, a reason, and telling the worker. Grievance content is end-to-end encrypted. Deadlines (business days, holidays, time zones) are computed for you. Help is never gated by dues. |
@@ -84,9 +84,10 @@ The original build specifications are in [`docs/spec/`](docs/spec/) and double a
 ## Before real-world use
 
 - **Host the server where no trustee controls it**, or the release lock binds nothing (it is enforced by the server; see the threat model).
+- **Read the [threat model](docs/THREAT_MODEL.md) first.** An [internal, AI-assisted security review](docs/reviews/2026-09-internal-review-1.md) found and fixed real problems and wrote down design-level limits (the biggest: a server that lies about which keys belong to whom). It is not an independent audit.
 - **Have a labor attorney review everything in `content/legal/`.** Every `TODO(lawyer)` / `TODO(accountant)` is a real open question.
 - Get an independent security review of `shared/crypto.js`, `server/`, and the deployment. Read the threat model first.
-- Set `WORKSPACE_MASTER_KEY` and back it up. Set `EMAIL_PROVIDER=postmark` (tracking is disabled in code) and a monitored `CONFIRMATION_REPLY_TO` inbox. Run behind HTTPS with `TRUST_PROXY=1`. Run **one** instance (challenges and rate limits are in memory).
+- Set `WORKSPACE_MASTER_KEY` and back it up. Set `EMAIL_PROVIDER=postmark` (tracking is disabled in code) and a monitored `CONFIRMATION_REPLY_TO` inbox. Run behind HTTPS with `TRUST_PROXY=1` (the number of reverse proxies in front, 1 for Caddy or nginx), and set `NODE_ENV=production` (`npm start` does not, and without it the master key is written next to the database). Run **one** instance (challenges and rate limits are in memory).
 - The Spanish translation is a first draft and needs a native, legally aware review.
 
 ## Not built yet
@@ -120,7 +121,9 @@ Project Ludlow is free software, licensed under the **GNU Affero General Public 
 | `ONLINE_OFFICER_ELECTIONS` | `false` | Needs attorney sign-off |
 | `SESSION_IDLE_HOURS`, `SESSION_MAX_DAYS` | `12`, `30` | Workspace sessions |
 | `RATE_STRICT_PER_MIN` | `90` | Sensitive-route limit per client per minute (a group signing on one Wi-Fi shares an IP) |
-| `TRUST_PROXY` | off | Read the client IP from proxy headers (rate limiting only) |
+| `TRUST_PROXY` | `0` | How many reverse proxies sit in front (1 for Caddy or nginx). The client IP is then read from the end of `X-Forwarded-For` (rate limiting only) |
+| `MIN_VOTE_HOURS` | `24` | The shortest a vote may stay open, so members have time to see it |
+| `CONFIRMATIONS_PER_CAMPAIGN_PER_DAY` | `2000` | Caps the confirmation emails one campaign can make this server send |
 
 ## Layout
 

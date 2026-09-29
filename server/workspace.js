@@ -2,9 +2,9 @@
 // campaign system (named members, roles, encryption at rest, audit log) and no table is shared with it.
 // Every route below is registered through W(), which authenticates, checks the permission matrix in
 // shared/permissions.js, and (for recognized-only modules) checks the workspace stage.
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomInt } from 'node:crypto';
 import { fail } from './http.js';
-import { hashToken, newToken, verifyAuth, publicFromSecret, countBallots, chainHash, sha256Text, GENESIS, b64, randomBytes } from '../shared/crypto.js';
+import { hashToken, newToken, verifyAuth, verifyTally, publicFromSecret, countBallots, chainHash, sha256Text, GENESIS, b64, randomBytes } from '../shared/crypto.js';
 import { takeChallenge, bearer } from './auth.js';
 import { PERMS, can, ASSIGNABLE_ROLES } from '../shared/permissions.js';
 import {
@@ -52,7 +52,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     if (!m || typeof m !== 'object') fail(400, 'bad_request');
     const legalName = optStr(m.legalName, 120);
     need(legalName && isTok(m.claimTokenHash));
-    const roles = Array.isArray(m.roles) ? m.roles : [];
+    const roles = Array.isArray(m.roles) ? [...new Set(m.roles)] : []; // a role listed twice would violate the primary key and come back as a 500
     need(roles.every((r) => ASSIGNABLE_ROLES.includes(r)));
     return {
       legalName, email: optStr(m.email, 254), phone: optStr(m.phone, 32), address: optStr(m.address, 300), jobTitle: optStr(m.jobTitle, 120),
@@ -79,7 +79,8 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     need(Array.isArray(b.members) && b.members.length >= 1 && b.members.length <= 3000);
     const jurisdiction = /^[a-z0-9-]{2,30}$/.test(b.jurisdiction || '') ? b.jurisdiction : 'us-nlra';
     const timezone = validTz(b.timezone) ? b.timezone : 'America/Denver';
-    const fy = /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(b.fiscalYearStart || '') ? b.fiscalYearStart : '01-01';
+    const validMonthDay = (s) => { const m = /^(\d{2})-(\d{2})$/.exec(s || ''); return !!m && Number(m[1]) >= 1 && Number(m[1]) <= 12 && Number(m[2]) >= 1 && Number(m[2]) <= [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][Number(m[1]) - 1]; };
+    const fy = validMonthDay(b.fiscalYearStart) ? b.fiscalYearStart : '01-01';
     const members = b.members.map(cleanMember);
     if (!members.some((m) => m.roles.includes('officer'))) fail(400, 'officer_required');
     const wsId = randomUUID(), { dk, wrapped } = kms.newDataKey(), t = now();
@@ -188,9 +189,12 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     return { status: 'member' };
   });
   W('POST', '/api/ws/me/profile', 'me.write', ({ me, body: b }) => {
+    // A field the form does not send keeps its value; only what is sent changes (saving used to erase the location and language).
+    const cur = db.prepare('SELECT shift, location, preferred_language pl FROM ws_members WHERE id=?').get(me.id);
+    const keep = (sent, old, max) => (sent === undefined ? old : optStr(sent, max));
     db.prepare('UPDATE ws_members SET phone_enc=?, address_enc=?, job_title_enc=?, shift=?, location=?, preferred_language=? WHERE id=?').run(
       enc(me.dk, 'member.phone', optStr(b.phone, 32)), enc(me.dk, 'member.address', optStr(b.address, 300)), enc(me.dk, 'member.job_title', optStr(b.jobTitle, 120)),
-      optStr(b.shift, 60), optStr(b.location, 60), optStr(b.preferredLanguage, 30), me.id);
+      keep(b.shift, cur.shift, 60), keep(b.location, cur.location, 60), keep(b.preferredLanguage, cur.pl, 30), me.id);
     return { saved: true };
   });
   // Members can always see who looked at their record.
@@ -207,8 +211,15 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   });
   W('POST', '/api/ws/roles', 'roles.assign', ({ me, body: b }) => {
     need(isUuid(b.memberId) && ASSIGNABLE_ROLES.includes(b.role) && ['add', 'remove'].includes(b.op));
-    const target = db.prepare('SELECT id FROM ws_members WHERE id=? AND workspace_id=?').get(b.memberId, me.wsId);
+    const target = db.prepare('SELECT id, membership_status s FROM ws_members WHERE id=? AND workspace_id=?').get(b.memberId, me.wsId);
     if (!target) fail(404, 'not_found');
+    if (b.op === 'add') {
+      // Nobody hands themselves power, and only someone who has joined the union can hold a role. Without these two rules one officer could
+      // add people who then approve each other's spending. A role the members took away by a vote comes back only by a vote.
+      if (b.memberId === me.id) fail(403, 'no_self_assign');
+      if (target.s !== 'member') fail(409, 'not_a_member');
+      if (db.prepare('SELECT 1 FROM ws_roles WHERE member_id=? AND role=? AND removed_at IS NOT NULL AND removed_by_vote_id IS NOT NULL').get(b.memberId, b.role)) fail(409, 'removed_by_vote');
+    }
     db.transaction(() => {
       if (b.op === 'add') {
         db.prepare(`INSERT INTO ws_roles (member_id,role,assigned_by,assigned_at) VALUES (?,?,?,?)
@@ -229,7 +240,9 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   });
   W('POST', '/api/ws/members', 'roster.add', ({ me, body: b }) => {
     need(Array.isArray(b.members) && b.members.length >= 1 && b.members.length <= 3000);
-    const members = b.members.map(cleanMember);
+    // Adding people after founding only creates unit employees. Each joins the union themselves, and roles are assigned one at a time (and audited).
+    // Taking `status` and `roles` from the request let a single officer create voting members and officers in one call.
+    const members = b.members.map(cleanMember).map((m) => ({ ...m, status: 'unit_employee', roles: [], founding: false }));
     const ids = db.transaction(() => {
       const out = members.map((m) => insertMember(me.wsId, me.dk, m, me.id));
       audit(me.wsId, me.id, `roster.add:${out.length}`, 'workspace', me.wsId);
@@ -271,6 +284,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   // ---------- votes ----------
   // A vote can carry an "effect" that the server applies itself when the vote passes: nobody has to
   // remember to implement the members' decision, and nobody can quietly skip it.
+  const EFFECT_TYPES = ['dues_change', 'bylaws_amendment', 'recall', 'officer_election'];
   function validateEffect(me, type, e, options) {
     const memberOk = (id) => isUuid(id) && db.prepare('SELECT 1 FROM ws_members WHERE id=? AND workspace_id=?').get(id, me.wsId);
     if (type === 'dues_change') { need(e?.kind === 'dues' && isStr(e.name, 80) && int(e.amountCents, 0, 100_000_000)); return { kind: 'dues', name: e.name.trim(), amountCents: e.amountCents }; }
@@ -290,9 +304,14 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     need(isStr(s.title, 160) && VOTE_TYPES.includes(s.type));
     if (s.type === 'officer_election' && !cfg.onlineOfficerElections) fail(403, 'feature_disabled'); // online officer elections stay off until an attorney approves (V2 rule 13)
     let options = Array.isArray(s.options) ? s.options.map((o) => String(o).trim()) : [];
+    // A vote that carries out its own decision must mean the same thing whoever wrote it: option 0 is the action, and the rule looks at option 0.
+    // Otherwise a creator could list "Keep dues as they are" first, or pick "plurality" so a unique "No" winner counts as "passed".
     if (s.type === 'recall') options = ['Remove from office', 'Keep in office'];
+    if (s.type === 'dues_change' || s.type === 'bylaws_amendment') options = ['Yes', 'No'];
     need(options.length >= 2 && options.length <= 12 && options.every((o) => o && o.length <= 120));
-    const passRule = s.type === 'officer_election' ? 'plurality' : PASS_RULES.includes(s.passRule) ? s.passRule : 'majority';
+    const passRule = s.type === 'officer_election' ? 'plurality'
+      : EFFECT_TYPES.includes(s.type) ? (['majority', 'two_thirds'].includes(s.passRule) ? s.passRule : 'majority')
+        : PASS_RULES.includes(s.passRule) ? s.passRule : 'majority';
     return { title: s.title.trim(), description: optStr(s.description, 2000), type: s.type, options, passRule, effect: validateEffect(me, s.type, s.effect, options) };
   }
   const refreshVotes = (wsId) => db.prepare("UPDATE ws_votes SET status='closed', closed_at=? WHERE workspace_id=? AND status='open' AND closes_at < ?").run(now(), wsId, now());
@@ -334,11 +353,16 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       spec = normalizeSpec(me, spec);
     } else spec = normalizeSpec(me, b);
     const closesMs = Date.parse(b.closesAt);
-    need(closesMs > Date.now() + 1000 && closesMs < Date.now() + 400 * 86400_000);
+    // Members need real time to see a vote and take part. Without a minimum, whoever opens it could give it a few seconds and let it close unseen
+    // (the recall of an officer is the obvious target). Five minutes of slack absorbs clock differences with the person's device.
+    const minMs = cfg.minVoteHours > 0 ? cfg.minVoteHours * 3600_000 - 300_000 : 1000;
+    need(closesMs >= Date.now() + minMs && closesMs < Date.now() + 400 * 86400_000);
     need(isB64(b.votePublicKey, 43, 43) && Array.isArray(b.committee) && b.committee.length >= 2 && b.committee.length <= 9 && int(b.thresholdK, 2, b.committee.length));
     const ok = new Set(holders(me.wsId, 'election_committee', true).map((m) => m.id));
     need(b.committee.every((c) => ok.has(c?.memberId) && isB64(c.sealed, 60, 300)) && new Set(b.committee.map((c) => c.memberId)).size === b.committee.length);
     if (spec.type === 'officer_election' && spec.effect.memberIds.some((id) => b.committee.some((c) => c.memberId === id))) fail(409, 'committee_conflict'); // candidates cannot run their own election
+    // ...and nobody can run their own recall: not by opening it, and not by sitting on the committee that counts it
+    if (spec.type === 'recall' && (spec.effect.memberId === me.id || b.committee.some((c) => c.memberId === spec.effect.memberId))) fail(409, 'committee_conflict');
     const id = randomUUID();
     db.transaction(() => {
       db.prepare(`INSERT INTO ws_votes (id,workspace_id,title,description,type,options_json,pass_rule,effect_json,petition_id,closes_at,created_by,created_at,vote_public_key,threshold_k,committee_json)
@@ -351,6 +375,21 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     })();
     return { voteId: id };
   });
+
+  // Rewrites one vote's ballots and receipts in a random order. SQLite places each new row below the previous one inside its page, so without this the
+  // order they sit on disk IS the order people voted in, and a copy of the database (a backup, a subpoena) could line ballots up with the times members
+  // were seen. secure_delete is on, so the old layout is zeroed rather than left behind. Cheap at a union's size: it moves one vote's rows, once per cast.
+  function scrambleVote(voteId) {
+    const shuffled = (rows) => { for (let i = rows.length - 1; i > 0; i--) { const j = randomInt(i + 1); [rows[i], rows[j]] = [rows[j], rows[i]]; } return rows; };
+    const ballots = shuffled(db.prepare('SELECT id, choice_ciphertext c FROM ws_ballots WHERE vote_id=?').all(voteId));
+    const receipts = shuffled(db.prepare('SELECT receipt_hash h FROM ws_vote_receipts WHERE vote_id=?').all(voteId));
+    db.prepare('DELETE FROM ws_ballots WHERE vote_id=?').run(voteId);
+    db.prepare('DELETE FROM ws_vote_receipts WHERE vote_id=?').run(voteId);
+    const addBallot = db.prepare('INSERT INTO ws_ballots (id,vote_id,choice_ciphertext) VALUES (?,?,?)');
+    for (const b of ballots) addBallot.run(b.id, voteId, b.c);
+    const addReceipt = db.prepare('INSERT INTO ws_vote_receipts (vote_id,receipt_hash) VALUES (?,?)');
+    for (const r of receipts) addReceipt.run(voteId, r.h);
+  }
 
   // Casting a ballot: one transaction that (1) marks the voter as having voted and (2) stores an
   // encrypted ballot with NO reference to the voter and NO timestamp. Nothing here is logged with an identity.
@@ -366,6 +405,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
         }
         db.prepare('INSERT INTO ws_ballots (id,vote_id,choice_ciphertext) VALUES (?,?,?)').run(randomUUID(), v.id, b.ciphertext);
         db.prepare('INSERT INTO ws_vote_receipts (vote_id,receipt_hash) VALUES (?,?)').run(v.id, b.receiptHash);
+        scrambleVote(v.id); // so the rows on disk do not spell out who voted first
       })();
     } catch (e) { if (e?.status) throw e; constraint(e); }
     return { cast: true };
@@ -373,7 +413,14 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
 
   W('POST', '/api/ws/votes/:id/close', 'vote.close', ({ me, params }) => {
     const v = getVote(me, params.id);
-    if (v.status === 'open') { db.prepare("UPDATE ws_votes SET status='closed', closed_at=? WHERE id=?").run(now(), v.id); audit(me.wsId, me.id, 'vote.closed', 'vote', v.id); }
+    if (v.status === 'open') {
+      // A vote ends at its closing time, or once every eligible member has voted. Nobody can end it early: that would let whoever holds this
+      // permission shut a vote (for instance their own recall) before members have seen it.
+      const t = db.prepare('SELECT COUNT(*) e, COALESCE(SUM(has_voted),0) v FROM ws_vote_participation WHERE vote_id=?').get(v.id);
+      if (t.v < t.e) fail(409, 'vote_still_open');
+      db.prepare("UPDATE ws_votes SET status='closed', closed_at=? WHERE id=?").run(now(), v.id);
+      audit(me.wsId, me.id, 'vote.closed', 'vote', v.id);
+    }
     return { status: 'closed' };
   });
 
@@ -383,6 +430,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     if (!JSON.parse(v.committee_json).some((c) => c.memberId === me.id)) fail(403, 'forbidden');
     return {
       votePublicKey: v.vote_public_key, options: JSON.parse(v.options_json), passRule: v.pass_rule, thresholdK: v.threshold_k, committee: JSON.parse(v.committee_json), status: v.status,
+      hasEffect: !!v.effect_json, // such a decision must be counted in the open: the ballot key has to be published so anyone can recount
       ballots: db.prepare('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=? ORDER BY id').all(v.id).map((r) => r.c),
     };
   });
@@ -404,13 +452,13 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       return 'policy';
     }
     if (e.kind === 'role_revoke' && res.passed) {
-      db.prepare('UPDATE ws_roles SET removed_at=? WHERE member_id=? AND role=? AND removed_at IS NULL').run(t, e.memberId, e.role);
+      db.prepare('UPDATE ws_roles SET removed_at=?, removed_by_vote_id=? WHERE member_id=? AND role=? AND removed_at IS NULL').run(t, v.id, e.memberId, e.role); // remembered, so an officer cannot quietly give the role back
       audit(me.wsId, me.id, `recall.applied:${e.role}`, 'member', e.memberId);
       return 'role_revoke';
     }
     if (e.kind === 'role_grant' && res.winner != null) {
       db.prepare(`INSERT INTO ws_roles (member_id,role,assigned_by,assigned_at) VALUES (?,?,?,?)
-        ON CONFLICT(member_id,role) DO UPDATE SET removed_at=NULL, assigned_at=excluded.assigned_at`).run(e.memberIds[res.winner], e.role, me.id, t);
+        ON CONFLICT(member_id,role) DO UPDATE SET removed_at=NULL, removed_by_vote_id=NULL, assigned_at=excluded.assigned_at`).run(e.memberIds[res.winner], e.role, me.id, t);
       audit(me.wsId, me.id, `election.applied:${e.role}`, 'member', e.memberIds[res.winner]);
       return 'role_grant';
     }
@@ -424,22 +472,38 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     if (!JSON.parse(v.committee_json).some((c) => c.memberId === me.id)) fail(403, 'forbidden');
     const options = JSON.parse(v.options_json);
     const ballots = db.prepare('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=? ORDER BY id').all(v.id).map((r) => r.c);
-    let counts, invalid;
+    // Every ballot came from a member who voted, and each has a receipt. A different number means something was added or removed outside the
+    // normal path, so nothing is counted until that is explained.
+    const t = db.prepare('SELECT COUNT(*) e, COALESCE(SUM(has_voted),0) v FROM ws_vote_participation WHERE vote_id=?').get(v.id);
+    const receiptCount = db.prepare('SELECT COUNT(*) c FROM ws_vote_receipts WHERE vote_id=?').get(v.id).c;
+    if (ballots.length !== t.v || receiptCount !== t.v) fail(409, 'ballot_count_mismatch', { ballots: ballots.length, receipts: receiptCount, voted: t.v });
+    let counts, invalid, attested = 0;
     if (b.secretKey != null) { // the committee chose to publish the key: the server re-counts and refuses a wrong tally
       need(isB64(b.secretKey, 43, 43));
       if (publicFromSecret(b.secretKey) !== v.vote_public_key) fail(400, 'wrong_key');
       ({ counts, invalid } = countBallots(v.vote_public_key, b.secretKey, ballots, options.length));
       if (Array.isArray(b.counts) && b.counts.some((c, i) => c !== counts[i])) fail(400, 'count_mismatch');
     } else {
+      // Without the key the server cannot recount, so the result is only as good as the people who vouch for it.
+      // A decision that changes who holds a role, the dues or the rules is never accepted this way: everyone must be able to recount it.
+      if (v.effect_json) fail(409, 'key_required');
       need(Array.isArray(b.counts) && b.counts.length === options.length && b.counts.every((c) => int(c, 0, 1_000_000)));
       counts = b.counts;
       const sum = counts.reduce((a, c) => a + c, 0);
       if (sum > ballots.length) fail(400, 'count_mismatch');
       invalid = ballots.length - sum;
+      // ...and k different committee members must each have signed exactly these counts (one member alone cannot make up a result).
+      const committee = JSON.parse(v.committee_json), signers = new Set();
+      for (const a of Array.isArray(b.attestations) ? b.attestations.slice(0, 20) : []) {
+        if (!isUuid(a?.memberId) || !isB64(a.signature, 86, 86) || !committee.some((c) => c.memberId === a.memberId)) continue;
+        const m = db.prepare('SELECT sign_public_key k FROM ws_members WHERE id=? AND workspace_id=?').get(a.memberId, me.wsId);
+        if (m?.k && verifyTally(m.k, a.signature, v.id, counts)) signers.add(a.memberId);
+      }
+      if (signers.size < v.threshold_k) fail(403, 'not_enough_committee', { have: signers.size, need: v.threshold_k });
+      attested = signers.size;
     }
     const ev = evaluateVote(counts, v.pass_rule);
-    const t = db.prepare('SELECT COUNT(*) e, COALESCE(SUM(has_voted),0) v FROM ws_vote_participation WHERE vote_id=?').get(v.id);
-    const results = { counts, invalid, total: ev.total, passed: ev.passed, winner: ev.winner, eligible: t.e, voted: t.v, tallyAt: now(), verifiable: b.secretKey != null };
+    const results = { counts, invalid, total: ev.total, passed: ev.passed, winner: ev.winner, eligible: t.e, voted: t.v, tallyAt: now(), verifiable: b.secretKey != null, ...(attested ? { attestedBy: attested } : {}) };
     let effect = null;
     db.transaction(() => {
       db.prepare("UPDATE ws_votes SET status='tallied', results_json=?, revealed_secret_key=? WHERE id=?").run(JSON.stringify(results), b.secretKey ?? null, v.id);
@@ -516,7 +580,11 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   function grievanceFor(me, id, mode) {
     const g = db.prepare('SELECT * FROM ws_grievances WHERE id=? AND workspace_id=?').get(id, me.wsId);
     const chief = me.roles.has('chief_steward');
-    const allowed = g && (chief || g.assigned_to === me.id || (mode === 'read' && g.submitted_by === me.id));
+    // Reading is for the chief stewards, the assigned steward and the worker. WORKING a case (steps, decisions, closing, assigning) also takes
+    // the case key: the sealed key is what proves the worker's case was entrusted to you. A role alone (a chief steward granted yesterday) is not
+    // enough, or one officer could give themselves the role and take over, reassign or close a case they can't even read.
+    const keyed = !!g && !!JSON.parse(g.sealed_keys)[me.id];
+    const allowed = g && (mode === 'read' ? (chief || g.assigned_to === me.id || g.submitted_by === me.id) : (chief || g.assigned_to === me.id) && keyed);
     if (!allowed) fail(404, 'not_found'); // never reveal whether a case exists to someone who cannot see it
     return g;
   }
@@ -529,6 +597,9 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       assignedTo: g.assigned_to ? { id: g.assigned_to, name: nameOf(me.dk, g.assigned_to) } : null,
     };
   }
+  // The contract article is kept in the clear so the case list can show it, so it may only be a short reference like "Art. 12" (the words of the
+  // concern are what is encrypted). A longer entry is refused instead of quietly storing, say, a supervisor's name in plaintext.
+  const articleRef = (v) => (v == null || v === '' ? null : typeof v === 'string' && /^[A-Za-z0-9 .§-]{1,20}$/.test(v.trim()) ? v.trim() : fail(400, 'bad_article'));
   W('POST', '/api/ws/grievances', 'grievance.submit', ({ me, body: b }) => {
     need(isUuid(b.id) && isB64(b.ciphertext, 16, 60000) && isB64(b.nonce, 32, 32) && b.sealedKeys && typeof b.sealedKeys === 'object');
     const chiefs = holders(me.wsId, 'chief_steward', true);
@@ -540,7 +611,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     try {
       db.transaction(() => {
         db.prepare(`INSERT INTO ws_grievances (id,workspace_id,submitted_by,article_ref,content_ciphertext,content_nonce,sealed_keys,filed_on,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-          .run(b.id, me.wsId, me.id, optStr(b.articleRef, 60), b.ciphertext, b.nonce, JSON.stringify(b.sealedKeys), today, now());
+          .run(b.id, me.wsId, me.id, articleRef(b.articleRef), b.ciphertext, b.nonce, JSON.stringify(b.sealedKeys), today, now());
         proc.steps.forEach((s, i) => db.prepare('INSERT INTO ws_grievance_steps (grievance_id,step_number,name,days,day_type,started_on,due_on) VALUES (?,?,?,?,?,?,?)')
           .run(b.id, i + 1, s.name, s.days, s.dayType, i === 0 ? today : null, i === 0 ? dueDate(today, s, proc.holidays) : null));
         audit(me.wsId, me.id, 'grievance.filed', 'grievance', b.id);
@@ -578,7 +649,8 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     if (g.status === 'closed') fail(409, 'closed');
     const steward = db.prepare(`SELECT m.id FROM ws_members m JOIN ws_roles r ON r.member_id=m.id WHERE m.id=? AND m.workspace_id=? AND r.role IN ('steward','chief_steward') AND r.removed_at IS NULL AND m.box_public_key IS NOT NULL`).get(b.stewardId, me.wsId);
     if (!steward) fail(404, 'steward_not_found');
-    const keys = { ...JSON.parse(g.sealed_keys), [b.stewardId]: b.sealedKey }; // the case key is re-sealed to the assigned steward
+    const keys = JSON.parse(g.sealed_keys);
+    if (!keys[b.stewardId]) keys[b.stewardId] = b.sealedKey; // the case key is re-sealed to the assigned steward. Nobody's existing key is ever replaced: a junk key would lock them out
     db.prepare('UPDATE ws_grievances SET assigned_to=?, sealed_keys=? WHERE id=?').run(b.stewardId, JSON.stringify(keys), g.id);
     audit(me.wsId, me.id, 'grievance.assigned', 'grievance', g.id);
     return { assigned: true };
@@ -698,7 +770,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     return { genesis: GENESIS, entries: rows.map((r) => ({ seq: r.seq, date: r.entry_date, kind: r.kind, cents: r.amount_cents, cat: r.category, rev: r.reverses_id ? seqOf.get(r.reverses_id) : null, at: r.created_at, commit: r.commit_hash, prevHash: r.prev_hash, hash: r.hash })) };
   });
   W('POST', '/api/ws/ledger/receipt', 'ledger.record', ({ me, body: b }) => {
-    need(RECEIPT_CATEGORIES[b.category]);
+    need(Object.hasOwn(RECEIPT_CATEGORIES, b.category)); // own keys only: "constructor" is a property of every object
     const r = addLedger(me, { kind: 'receipt', amountCents: money(b), category: b.category, payee: optStr(b.payer, 120), memo: optStr(b.memo, 300) });
     audit(me.wsId, me.id, 'ledger.receipt', 'ledger', r.id);
     return r;
@@ -718,7 +790,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
 
   const disbursementNeeds = (me, cents) => (cents >= policyOf(me).twoApprovalCents ? 2 : 1);
   W('POST', '/api/ws/disbursements', 'disbursement.request', ({ me, body: b }) => {
-    need(DISBURSEMENT_CATEGORIES[b.category] && isStr(b.payee, 120));
+    need(Object.hasOwn(DISBURSEMENT_CATEGORIES, b.category) && isStr(b.payee, 120));
     const cents = money(b), id = randomUUID();
     db.prepare('INSERT INTO ws_disbursements (id,workspace_id,requested_by,amount_cents,category,payee_enc,memo_enc,required_approvals,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
       .run(id, me.wsId, me.id, cents, b.category, enc(me.dk, 'disb.payee', b.payee.trim()), enc(me.dk, 'disb.memo', optStr(b.memo, 300)), disbursementNeeds(me, cents), now());
@@ -770,20 +842,26 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   // End-to-end records (grievance content, notes, reasons) are exported as ciphertext: only their holders can read them.
   W('GET', '/api/ws/export', 'export.all', ({ me }) => {
     const all = (sql, ...a) => db.prepare(sql).all(...a);
-    audit(me.wsId, me.id, 'export.all', 'workspace', me.wsId);
+    const memberRows = all('SELECT * FROM ws_members WHERE workspace_id=?', me.wsId);
+    // Every look at someone's data is logged where they can see it, and an export is a look at everyone's.
+    db.transaction(() => {
+      audit(me.wsId, me.id, 'export.all', 'workspace', me.wsId);
+      for (const m of memberRows) if (m.id !== me.id) audit(me.wsId, me.id, 'member.pii.read', 'member', m.id);
+    })();
     const w = me.ws;
     const seqOf = new Map(all('SELECT id, seq FROM ws_ledger WHERE workspace_id=?', me.wsId).map((r) => [r.id, r.seq]));
     return {
       format: 'ludlow-export-v1', exportedAt: now(),
       workspace: { id: w.id, unionName: w.union_name, employerName: w.employer_name, unitDescription: w.unit_description, stage: w.stage, stageNote: w.stage_note, jurisdiction: w.jurisdiction, timezone: w.timezone, fiscalYearStart: w.fiscal_year_start, policy: policyOf(me), procedure: procOf(me), createdAt: w.created_at },
-      members: all('SELECT * FROM ws_members WHERE workspace_id=?', me.wsId).map((m) => person(me.dk, m)),
+      members: memberRows.map((m) => person(me.dk, m)),
       roles: all('SELECT member_id memberId, role, assigned_at assignedAt, removed_at removedAt FROM ws_roles WHERE member_id IN (SELECT id FROM ws_members WHERE workspace_id=?)', me.wsId),
       bylawsVersions: all('SELECT version, summary, policy_json p, ratified_by_vote_id voteId, created_at at FROM ws_bylaws_versions WHERE workspace_id=? ORDER BY version', me.wsId).map((r) => ({ ...r, policy: JSON.parse(r.p), p: undefined })),
       announcements: all('SELECT title, body, created_at at FROM ws_announcements WHERE workspace_id=? ORDER BY created_at', me.wsId),
       votes: all('SELECT * FROM ws_votes WHERE workspace_id=? ORDER BY created_at', me.wsId).map((v) => ({
         id: v.id, title: v.title, description: v.description, type: v.type, options: JSON.parse(v.options_json), passRule: v.pass_rule, status: v.status, closesAt: v.closes_at,
         effect: v.effect_json ? JSON.parse(v.effect_json) : null, results: v.results_json ? JSON.parse(v.results_json) : null, revealedSecretKey: v.revealed_secret_key,
-        ballots: all('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=?', v.id).map((r) => r.c), receiptHashes: all('SELECT receipt_hash h FROM ws_vote_receipts WHERE vote_id=?', v.id).map((r) => r.h),
+        // Ballots and receipts leave only once the vote is counted. While it is open, reading them as they arrive would isolate each ballot with its receipt.
+        ...(v.status === 'tallied' ? { ballots: all('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=?', v.id).map((r) => r.c), receiptHashes: all('SELECT receipt_hash h FROM ws_vote_receipts WHERE vote_id=?', v.id).map((r) => r.h) } : { ballots: [], receiptHashes: [] }),
       })),
       petitions: all('SELECT * FROM ws_petitions WHERE workspace_id=?', me.wsId).map((p) => ({ id: p.id, title: p.title, description: p.description, voteType: p.vote_type, status: p.status, needed: p.needed, signers: all('SELECT COUNT(*) c FROM ws_petition_signers WHERE petition_id=?', p.id)[0].c })),
       grievances: all('SELECT * FROM ws_grievances WHERE workspace_id=?', me.wsId).map((g) => ({

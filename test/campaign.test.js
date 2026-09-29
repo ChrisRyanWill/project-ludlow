@@ -32,7 +32,8 @@ describe('campaign: zero-knowledge authorization cards', () => {
     const k = C.newKeypairs();
     const e = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: id, enrollToken: tok[0], boxPublicKey: k.boxPublicKey, signPublicKey: k.signPublicKey } });
     assert.deepEqual([e.json.enrolledCount, e.json.status, e.json.committeeComplete], [1, 'active', false]); // the founder alone is enough to start collecting cards
-    const e2 = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: id, enrollToken: tok[1], boxPublicKey: k.boxPublicKey, signPublicKey: C.newKeypairs().signPublicKey } });
+    const k2 = C.newKeypairs(); // a second trustee is a second person with their own keys
+    const e2 = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: id, enrollToken: tok[1], boxPublicKey: k2.boxPublicKey, signPublicKey: k2.signPublicKey } });
     assert.deepEqual([e2.json.enrolledCount, e2.json.committeeComplete], [2, true]);
     assert.equal((await h.call('POST', '/api/trustees/enroll', { body: { campaignId: id, enrollToken: tok[0], boxPublicKey: k.boxPublicKey, signPublicKey: k.signPublicKey } })).status, 401); // token is single-use
   });
@@ -313,6 +314,31 @@ describe('campaign: one person can start alone and add the committee later', () 
     assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/committee`, { auth: await tAuth(2, 'POST /api/campaigns/:id/committee'), body: { n: 3, k: 2 } })).json.error, 'founder_only');
   });
 
+  it('only the founder hands out seats: a trustee cannot re-issue an empty seat to take it (which would let one person hold k shares)', async () => {
+    const before = h.app.db.prepare('SELECT enrollment_token_hash h FROM trustees WHERE campaign_id=? AND trustee_index=3').get(camp.id).h;
+    const rogue = await h.call('POST', `/api/campaigns/${camp.id}/trustees/reset`, { auth: await tAuth(2, 'POST /api/campaigns/:id/trustees/reset'), body: { index: 3, tokenHash: C.hashToken(C.newToken()) } });
+    assert.equal(rogue.status, 403);
+    assert.equal(rogue.json.error, 'founder_only');
+    // nothing changed: the link the founder gave the real third trustee is still the only one that works
+    assert.equal(h.app.db.prepare('SELECT enrollment_token_hash h FROM trustees WHERE campaign_id=? AND trustee_index=3').get(camp.id).h, before);
+    // and without any trustee credentials at all it is refused too
+    assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/trustees/reset`, { body: { index: 3, tokenHash: C.hashToken(C.newToken()) } })).status, 401);
+  });
+
+  it('the same keys cannot fill two seats, and a refused attempt leaves the seat open for the real person', async () => {
+    const c2 = await makeCampaign(h, { n: 3, k: 2, enroll: 1 });
+    const founderKeys = c2.trustees[0].keys;
+    const reuse = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: c2.id, enrollToken: c2.enrollTokens[1], boxPublicKey: founderKeys.boxPublicKey, signPublicKey: founderKeys.signPublicKey } });
+    assert.equal(reuse.status, 409);
+    assert.equal(reuse.json.error, 'key_reused');
+    // reusing just one of the two keys is refused as well
+    const half = C.newKeypairs();
+    const halfReuse = await h.call('POST', '/api/trustees/enroll', { body: { campaignId: c2.id, enrollToken: c2.enrollTokens[1], boxPublicKey: half.boxPublicKey, signPublicKey: founderKeys.signPublicKey } });
+    assert.equal(halfReuse.json.error, 'key_reused');
+    // the seat is still open, and the real second trustee, with their own keys, can take it with the same link
+    assert.equal((await enrollTrustee(h, c2, 2)).r.status, 200);
+  });
+
   it('when everyone has joined, new cards are k-of-n, and the founder locks the early ones to the committee', async () => {
     const before = await h.call('GET', `/api/campaigns/${camp.id}/progress`, { auth: await tAuth(1, 'GET /api/campaigns/:id/progress') });
     assert.equal(before.json.solo, 2);
@@ -337,6 +363,7 @@ describe('campaign: one person can start alone and add the committee later', () 
     const reshare = async (i, body) => h.call('POST', `/api/campaigns/${camp.id}/reshare`, { auth: await tAuth(i, 'POST /api/campaigns/:id/reshare'), body });
     assert.equal((await reshare(2, { cards })).json.error, 'founder_only'); // a rogue trustee could only destroy cards
     assert.equal((await reshare(1, { cards: [{ cardId: cards[0].cardId, sealedShares: cards[0].sealedShares.slice(0, 2) }] })).json.error, 'bad_shares');
+    for (const junk of [null, 'x', {}, 7]) assert.equal((await reshare(1, { cards: [{ cardId: cards[0].cardId, sealedShares: junk }] })).status, 400, String(junk)); // malformed input is a 400, never a crash
     assert.deepEqual((await reshare(1, { cards })).json, { converted: 2, remaining: 0 });
     assert.equal((await reshare(1, { cards: [cards[0]] })).json.error, 'not_solo');
 
@@ -362,7 +389,7 @@ describe('campaign: the release number is enforced, not advisory', () => {
   const setMin = async (i, value) => h.call('POST', `/api/campaigns/${camp.id}/release-min`, { auth: await tAuth(i, 'POST /api/campaigns/:id/release-min'), body: { value } });
   let cards = [];
 
-  it('refuses to hand over any sealed card until enough people have signed AND been confirmed', async () => {
+  it('refuses to hand over any sealed card until enough people have signed AND been counted (vouched for)', async () => {
     for (const n of ['Ann One', 'Ben Two']) { const inv = await makeInvite(h, camp); cards.push(await signCard(h, camp, inv.token, { name: n })); }
     const g = await makeInvite(h, camp, { kind: 'group', by: cards[0] });
     const pending = await signCard(h, camp, g.token, { name: 'Pending Person' }, { group: true }); // an unconfirmed card does not count
@@ -403,5 +430,29 @@ describe('campaign: the release number is enforced, not advisory', () => {
     const body = (releaseMin) => ({ id, k: 2, n: 2, releaseMin, metaCiphertext: box.ciphertext, metaNonce: box.nonce, templateVersion: 'card-v1', enrollTokenHashes: [C.hashToken(C.newToken()), C.hashToken(C.newToken())] });
     for (const bad of [0, 2.5, 'many']) assert.equal((await h.call('POST', '/api/campaigns', { body: body(bad) })).status, 400);
     assert.equal((await h.call('POST', '/api/campaigns', { body: body(51) })).status, 200);
+  });
+});
+
+
+describe('campaign: the confirmation email cannot be used to send mail to arbitrary people', () => {
+  let h, camp;
+  before(async () => { h = await startApp({ rateLimitDisabled: false, confirmationsPerCampaignPerDay: 5 }); camp = await makeCampaign(h, { n: 3, k: 2 }); });
+  after(() => h.stop());
+  const signer = async (email) => { const inv = await makeInvite(h, camp); return signCard(h, camp, inv.token, { name: 'Pat Signer', email }); };
+
+  it('one address gets at most three a day, however many cards name it', async () => {
+    const results = [];
+    for (let i = 0; i < 4; i++) results.push(await confirm(h, camp, await signer('victim@example.net')));
+    assert.deepEqual(results.map((r) => r.status), [200, 200, 200, 429]);
+    assert.equal(results[3].json.error, 'too_many_for_this_address');
+    assert.equal((await confirm(h, camp, await signer('other@example.net'))).status, 200); // other addresses are unaffected
+  });
+
+  it('one campaign can only make so much mail go out in a day', async () => {
+    // 4 already went out above; the limit for this test app is 5
+    assert.equal((await confirm(h, camp, await signer('another@example.net'))).status, 200);
+    const capped = await confirm(h, camp, await signer('yet-another@example.net'));
+    assert.equal(capped.status, 429);
+    assert.equal(capped.json.error, 'confirmations_capped');
   });
 });

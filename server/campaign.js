@@ -5,6 +5,7 @@ import { fail } from './http.js';
 import { hashToken, vouchHash, verifyAuth } from '../shared/crypto.js';
 import { issueChallenge, takeChallenge, bearer, sigHeader } from './auth.js';
 import { confirmationEmail } from './mail.js';
+import { makeLimiter } from './rate.js';
 
 const B64 = /^[A-Za-z0-9_-]+$/;
 const isB64 = (s, min, max) => typeof s === 'string' && s.length >= min && s.length <= max && B64.test(s);
@@ -24,6 +25,8 @@ export function sweepInactive(db, days) {
 
 export function campaignRoutes({ router, db, cfg, mail }) {
   const R = (method, pattern, opts, handler) => router.add(method, pattern, opts, handler);
+  // One address gets at most three confirmations a day. Counted in memory only, under a salt that rotates daily: nothing about the address is stored.
+  const perRecipient = makeLimiter({ disabled: cfg.rateLimitDisabled, windowMs: 86_400_000, max: 3 });
   const touch = (id) => db.prepare('UPDATE campaigns SET last_activity_at=? WHERE id=?').run(now(), id);
 
   // A trustee proves who they are by signing a fresh challenge; returns the trustee's index.
@@ -98,6 +101,9 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     return db.transaction(() => {
       const t = db.prepare('SELECT id, trustee_index i FROM trustees WHERE campaign_id=? AND enrollment_token_hash=?').get(b.campaignId, hashToken(b.enrollToken));
       if (!t) fail(401, 'unauthorized');
+      // The same keys can never fill two seats. This is only a cheap guard (someone can still make a second key file), which is why the
+      // founder also confirms each seat's key words with the person before locking cards to the committee.
+      if (db.prepare('SELECT 1 FROM trustees WHERE campaign_id=? AND enrolled_at IS NOT NULL AND (box_public_key=? OR sign_public_key=?)').get(b.campaignId, b.boxPublicKey, b.signPublicKey)) fail(409, 'key_reused');
       db.prepare('UPDATE trustees SET box_public_key=?, sign_public_key=?, enrolled_at=?, enrollment_token_hash=NULL WHERE id=?').run(b.boxPublicKey, b.signPublicKey, now(), t.id);
       // The founder's key is enough to start collecting cards; the rest of the committee can join later.
       if (db.prepare('SELECT 1 FROM trustees WHERE campaign_id=? AND trustee_index=1 AND enrolled_at IS NOT NULL').get(b.campaignId)) {
@@ -208,6 +214,11 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const b = ctx.body;
     if (!isStr(b.to, 254) || !EMAIL.test(b.to) || !isStr(b.legalName, 120) || !isStr(b.phone, 32) || !isStr(b.employerName, 200)
       || !isStr(b.unionName, 200) || !isStr(b.cardText, 4000) || !isTok(b.disavowToken) || !equal(hashToken(b.disavowToken), card.disavow_token_hash)) fail(400, 'bad_request');
+    // Anyone can start a campaign and sign a card, so this route must not become a way to send mail from this server to arbitrary people:
+    // limit what one address can receive, and how much one campaign can make go out in a day.
+    if (!perRecipient(b.to.toLowerCase())) fail(429, 'too_many_for_this_address');
+    const since = new Date(Date.now() - 86400_000).toISOString();
+    if (db.prepare('SELECT COUNT(*) c FROM cards WHERE campaign_id=? AND confirmation_sent_at > ?').get(card.campaign_id, since).c >= cfg.confirmationsPerCampaignPerDay) fail(429, 'confirmations_capped');
     const email = confirmationEmail({ appName: cfg.appName, baseUrl: cfg.baseUrl, card: b, signedAt: card.created_at, cardId: card.id, disavowToken: b.disavowToken, templateVersion: card.template_version });
     let sent;
     try { sent = await mail.send({ to: b.to, subject: email.subject, text: email.text, replyTo: cfg.replyTo }); } catch { fail(502, 'email_failed'); }
@@ -392,7 +403,9 @@ export function campaignRoutes({ router, db, cfg, mail }) {
   // A fresh invitation for a trustee seat that has not been taken (also revokes any earlier, possibly leaked, link).
   R('POST', '/api/campaigns/:id/trustees/reset', { strict: true }, (ctx) => {
     const id = ctx.params.id;
-    authTrustee(ctx, 'POST /api/campaigns/:id/trustees/reset', id);
+    // Seats are the founder's to hand out. If any trustee could re-issue an empty seat, one person could take enough seats to hold k shares
+    // alone (and approve lowering the release number k times), which would defeat both the k-of-n rule and the release lock.
+    if (authTrustee(ctx, 'POST /api/campaigns/:id/trustees/reset', id) !== 1) fail(403, 'founder_only');
     const { index, tokenHash } = ctx.body;
     if (!Number.isInteger(index) || !isTok(tokenHash)) fail(400, 'bad_request');
     const r = db.prepare('UPDATE trustees SET enrollment_token_hash=? WHERE campaign_id=? AND trustee_index=? AND enrolled_at IS NULL').run(tokenHash, id, index);
@@ -418,7 +431,7 @@ export function campaignRoutes({ router, db, cfg, mail }) {
       if (enrolledCount(id) !== c.n) fail(409, 'committee_incomplete');
       for (const item of cards) {
         const idx = Array.isArray(item?.sealedShares) ? item.sealedShares.map((s) => s?.trusteeIndex) : [];
-        if (!isUuid(item?.cardId) || item.sealedShares.length !== c.n || !item.sealedShares.every((s) => Number.isInteger(s?.trusteeIndex) && isB64(s.sealed, 60, 300))
+        if (!isUuid(item?.cardId) || !Array.isArray(item.sealedShares) || item.sealedShares.length !== c.n || !item.sealedShares.every((s) => Number.isInteger(s?.trusteeIndex) && isB64(s.sealed, 60, 300))
           || new Set(idx).size !== c.n || idx.some((i) => i < 1 || i > c.n)) fail(400, 'bad_shares');
         const r = db.prepare("UPDATE cards SET sealed_shares=?, seal_mode='shamir' WHERE id=? AND campaign_id=? AND seal_mode='solo'")
           .run(JSON.stringify(item.sealedShares.map((s) => ({ trusteeIndex: s.trusteeIndex, sealed: s.sealed }))), item.cardId, id);

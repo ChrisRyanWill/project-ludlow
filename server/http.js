@@ -107,9 +107,13 @@ async function serveStatic(req, res, url, dir) {
   return res.end(req.method === 'HEAD' ? undefined : body);
 }
 
-function clientIp(req, cfg) {
-  if (cfg.trustProxy) {
-    const fwd = req.headers['fly-client-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+// Behind N trusted proxies, each one APPENDS the address it saw, so whatever a client writes into X-Forwarded-For itself sits at the front and cannot be
+// trusted. Count from the end: with one proxy the last entry is the real client. Fewer entries than proxies means the header was not set by them.
+export function clientIp(req, cfg) {
+  const hops = cfg.trustProxy === true ? 1 : Number(cfg.trustProxy) || 0;
+  if (hops > 0) {
+    const parts = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const fwd = req.headers['fly-client-ip'] || parts[parts.length - hops];
     if (fwd) return fwd;
   }
   return req.socket.remoteAddress || 'unknown';

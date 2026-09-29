@@ -9,7 +9,7 @@ import { PACKS, packOf, markersFor } from './packs.js';
 import { addCalendar, daysBetween } from '../../shared/deadlines.js';
 import {
   div, span, p, a, img, ul, li, h1, h2, h3, strong, em, small, input, label, textarea, select, option, details, summary, table, thead, tbody, tr, td, th,
-  btn, callout, badge, field, textInput, selectBox, linkBtn, shell, setTitle, view, fragment, go, act, toast, copy, share, download, md, fill, cardBody, readAloud, svg, pct, fmtDate, ago, wipers, setKids,
+  btn, callout, badge, field, textInput, selectBox, linkBtn, shell, setTitle, view, fragment, scrubFragment, go, act, toast, copy, share, download, md, fill, cardBody, readAloud, svg, pct, fmtDate, ago, wipers, setKids,
 } from './ui.js';
 
 export const linkTo = (path, params) => `${location.origin}${path}#${new URLSearchParams(params)}`;
@@ -159,7 +159,7 @@ export function StartPage() {
         const choices = pack.markers.map((m) => ({ n: Math.max(1, m.pct === 0.5 ? Math.floor(size / 2) + 1 : Math.ceil(size * m.pct)), label: m.label })).filter((c, i, a) => a.findIndex((x) => x.n === c.n) === i);
         if (!S.release) S.release = String(choices.find((c) => c.n === Math.floor(size / 2) + 1)?.n ?? Math.floor(size / 2) + 1); // default: a majority
         return div(h2(t('When should the cards be allowed to open?')),
-          p(t('This is a safety lock. Until at least this many people have signed and been confirmed, the cards stay sealed: nobody can open them, not even all your trustees together, and this website will not hand them over.')),
+          p(t('This is a safety lock. Until at least this many people have signed and been counted, the cards stay sealed: nobody can open them, not even all your trustees together, and this website will not hand them over. It is a safety catch, not a guarantee: it counts the cards the system accepted, anyone who can invite people can add cards, and until your committee has joined you alone hold the key.')),
           div({ class: 'stack' }, choices.map((c) => label2(String(c.n), S.release, () => { S.release = String(c.n); update(); }, t('{n} people', { n: c.n }), t(c.label)))),
           field(t('Or choose your own number'), textInput({ type: 'number', min: 1, value: S.release, oninput: (e) => { S.release = e.target.value; } })),
           Number(S.release) > size ? callout('warn', t('That is more than the {n} people you said are in your group. The cards would stay locked until more than everyone has signed.', { n: size })) : null,
@@ -209,6 +209,7 @@ export async function EnrollPage() {
   await C.ready;
   const f = fragment(), e = f.get('e'), k = f.get('k'), c = f.get('c');
   if (!e || !k || !c) return shell(div({ class: 'wrap' }, callout('danger', t('This link is incomplete. Ask for it to be sent again, and make sure the whole link is copied.'))));
+  scrubFragment(); // the secrets are in memory now; don't leave them in the address bar and the browser's history
   let raw, meta;
   try { ({ raw, meta } = await loadMeta(c, k, bearer(e))); } catch (err) {
     if (err.status === 401) return shell(div({ class: 'wrap' }, h1(t('This link was already used')), p(t('If you already set up your key, go to your trustee dashboard.')), linkBtn(t('Trustee dashboard'), '/t/dashboard', 'primary')));
@@ -221,6 +222,9 @@ export async function EnrollPage() {
     if (S.enrolled) {
       const done = S.enrolled.committeeComplete;
       return div(h1(t('You are enrolled')), callout('ok', t('{x} of {n} trustees have set up their keys.', { x: S.enrolled.enrolledCount, n: raw.n })),
+        div({ class: 'keycheck' }, strong(t('Your key words')),
+          p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the cards are locked to the committee, so nobody can slip in a different key.')),
+          div({ class: 'keywords', lang: 'en' }, C.keyWords(S.made.pub.boxPublicKey))),
         done ? p(t('Your committee is complete. From now on any {k} of the {n} trustees together can open the cards.', { k: raw.k, n: raw.n }))
           : idx === 1 ? callout('warn', strong(t('You can start inviting coworkers now.')), ' ', t('Until at least one more trustee joins, only you can open the cards. Add trustees from your dashboard when they are ready.'))
             : p(t('Thank you. The founder will lock the existing cards to the committee once everyone has joined.')),
@@ -280,6 +284,7 @@ export async function JoinPage() {
   const f = fragment(), i = f.get('i'), k = f.get('k'), c = f.get('c');
   const bad = (msg) => shell(div({ class: 'wrap' }, callout('danger', msg)));
   if (!i || !k || !c) return bad(t('This link is incomplete. Ask for it to be sent again, and make sure the whole link is copied.'));
+  scrubFragment(); // the secrets are in memory now; don't leave them in the address bar and the browser's history
   let info, raw, meta;
   try { info = await api('POST', '/api/invites/resolve', { body: { token: i } }); ({ raw, meta } = await loadMeta(c, k, bearer(i))); } catch { return bad(t('This invitation is no longer valid. It may have expired, been used, or been withdrawn. Ask the person who sent it for a new one.')); }
   const pack = packOf(meta.jurisdiction);
@@ -292,7 +297,7 @@ export async function JoinPage() {
         h1(t('{union}', { union: meta.unionName })),
         p({ class: 'lead' }, t('Coworkers at {employer} are forming a union, and you have been invited to sign an authorization card.', { employer: meta.employerName })),
         callout('ok', strong(t('Your information is encrypted on your phone before it is sent. This website cannot read it.'))),
-        raw.releaseMin > 1 ? callout('info', t('Your card stays sealed. Until at least {n} people have signed and been confirmed, nobody can open it: not the trustees, and not this website.', { n: raw.releaseMin })) : null,
+        raw.releaseMin > 1 ? callout('info', t('Your card stays sealed. Until at least {n} people have signed and been counted, nobody can open it: not the trustees, and not this website.', { n: raw.releaseMin })) : null,
         div({ class: 'card' }, h2(t('Before you sign')), ul(li(t('Use your own phone, on your mobile data, and not at work.')), li(t('Signing is your choice. Nobody can make you.')), li(t('You will get a confirmation email. If you did not sign, you can tell us.')), li(t('The law protects your right to organize.'), ' ', a({ href: '/rights', target: '_blank', rel: 'noopener' }, t('Read about your rights'))))),
         btn(t('Read the card'), () => { F.step = 'card'; update(); }, { kind: 'primary block' }));
     }
@@ -424,7 +429,10 @@ export async function MemberPage() {
       S.links.map((l) => inviteBox({ link: l.link, employer: meta.employerName, kind: l.kind }))) : null,
     pend.pending.length ? div({ class: 'card' }, h2(t('People waiting for you to confirm')), p(t('Ask each person for the two-word code they were shown. Only enter it if you met them in person.')), pend.pending.map((q, n) => vouchRow(auth, q, n + 1, update))) : null,
     lockerSection({ auth, lockerKey, c, raw, meta, pack, k }),
-    div({ class: 'card' }, h3(t('Your member link')), p({ class: 'small muted' }, t('Keep it private. It is how you get back here.')), btn(t('Copy my link'), () => copy(linkTo('/m', { s, k, c })), { kind: 'secondary small' })),
+    div({ class: 'card' }, h3(t('Your member link')), p({ class: 'small muted' }, t('Keep it private. It is how you get back here.')),
+      div({ class: 'row' }, btn(t('Copy my link'), () => copy(linkTo('/m', { s, k, c })), { kind: 'secondary small' }),
+        // Quick exit only leaves the page. This device keeps your sign-in so you can come back; this removes it (nothing is deleted from the server).
+        btn(t('Forget this device'), () => { if (confirm(t('Remove your saved sign-in from this device? To come back you will need the member link you saved. Nothing is deleted from the server.'))) { store.del(`member.${c}`); go('/'); } }, { kind: 'secondary small' }))),
     withdrawBtn(auth, c))))); // a pending member sees only the waiting screen; the rest is for counted members
 
   async function makeInvite(kind) {
@@ -515,6 +523,7 @@ function lockerSection({ auth, lockerKey, c, raw, meta, pack, k }) {
 export function DisavowPage() {
   setTitle('I did not sign', true);
   const f = fragment(), tok = f.get('t'), card = f.get('c');
+  if (tok && card) scrubFragment(); // the token is in memory now; don't leave it in the address bar and the browser's history
   let done = false;
   return shell(div({ class: 'wrap' }, view((update) => {
     if (!tok || !card) return callout('danger', t('This link is incomplete.'));

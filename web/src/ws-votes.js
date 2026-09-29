@@ -16,6 +16,7 @@ const TYPE_NAMES = {
 };
 const PASS_NAMES = { majority: 'A majority of votes cast', two_thirds: 'Two thirds of votes cast', plurality: 'The option with the most votes' };
 const dollars = (v) => Math.round(Number(v) * 100);
+const EFFECT_TYPES = ['dues_change', 'bylaws_amendment', 'recall']; // decisions the server carries out itself: option 0 is the action, so "plurality" makes no sense
 
 const effectText = (e) => {
   if (!e) return null;
@@ -55,12 +56,12 @@ function voteForm({ mode, roles, onDone, prefill = {} }) {
       mode === 'petition' ? p({ class: 'small muted' }, t('If enough members sign, the election committee must open this vote exactly as you write it.')) : null,
       field(t('What are members deciding?'), textInput({ value: F.title, oninput: (e) => (F.title = e.target.value) })),
       field(t('Explain it (optional)'), textarea({ rows: 3, value: F.description, oninput: (e) => (F.description = e.target.value) })),
-      field(t('Kind of decision'), selectBox(typeOptions, F.type, (v) => { F.type = v; update(); })),
+      field(t('Kind of decision'), selectBox(typeOptions, F.type, (v) => { F.type = v; if (EFFECT_TYPES.includes(v) && F.passRule === 'plurality') F.passRule = 'majority'; update(); })),
       F.type === 'dues_change' ? div({ class: 'row' }, field(t('Name of the dues plan'), textInput({ value: F.dues, oninput: (e) => (F.dues = e.target.value) })), field(t('Amount per month'), textInput({ type: 'number', min: 0, step: '0.01', value: F.amount, oninput: (e) => (F.amount = e.target.value) }))) : null,
       F.type === 'bylaws_amendment' ? div({ class: 'row' }, field(t('Rule to change'), selectBox(Object.entries(POLICY_FIELDS).map(([k, f]) => [k, t(f.label)]), F.key, (v) => { F.key = v; update(); })), field(t('New value'), textInput({ type: 'number', min: 0, value: F.value, oninput: (e) => (F.value = e.target.value) }))) : null,
       F.type === 'recall' ? field(t('Who and which role?'), selectBox(roles.map((r) => [`${r.memberId}|${r.role}`, `${r.name}: ${r.role}`]), F.target, (v) => (F.target = v))) : null,
       !['dues_change', 'bylaws_amendment', 'recall'].includes(F.type) ? field(t('Choices (one per line, the first is "Yes")'), textarea({ rows: 3, value: F.options, oninput: (e) => (F.options = e.target.value) })) : null,
-      field(t('It passes with'), selectBox(Object.entries(PASS_NAMES).map(([k, v]) => [k, t(v)]), F.passRule, (v) => (F.passRule = v))),
+      field(t('It passes with'), selectBox(Object.entries(PASS_NAMES).filter(([k]) => k !== 'plurality' || !EFFECT_TYPES.includes(F.type)).map(([k, v]) => [k, t(v)]), F.passRule, (v) => (F.passRule = v))),
       mode === 'vote' ? field(t('Voting stays open for (days)'), textInput({ type: 'number', min: 1, max: 60, value: F.days, oninput: (e) => (F.days = Number(e.target.value) || 7) })) : null,
       div({ class: 'row' }, btn(mode === 'petition' ? t('Start the petition') : t('Open the vote'), act(submit), { kind: 'primary' }), btn(t('Cancel'), onDone, { kind: 'secondary' })));
   });
@@ -116,7 +117,7 @@ export async function VoteDetail({ id }) {
       v.hasVoted ? div(callout('ok', t('You have voted.')), S.receipt ? receiptBox(S.receipt) : p({ class: 'small muted' }, t('Your receipt code was shown when you voted.'))) :
         v.eligible ? div(h2(t('Cast your secret ballot')),
           div({ class: 'stack' }, v.options.map((o, i) => div({ class: `choice ${S.choice === i ? 'on' : ''}`, role: 'radio', 'aria-checked': S.choice === i, tabindex: 0, onclick: () => { S.choice = i; update(); }, onkeydown: (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); S.choice = i; update(); } } }, strong(o)))),
-          p({ class: 'small muted' }, t('Nobody, including the officers and this website, can tell how you voted. You cannot change your vote afterward.')),
+          p({ class: 'small muted' }, t('Your ballot is stored without your name or the time you voted, so officers and other members cannot see how you voted. You cannot change your vote afterward.')),
           btn(t('Cast my ballot'), act(async () => {
             if (S.choice == null) return toast(t('Choose an option first.'), 'bad');
             const b = C.castBallot(v.votePublicKey, S.choice);
@@ -126,7 +127,7 @@ export async function VoteDetail({ id }) {
             render();
           }), { kind: 'primary block', disabled: false })) :
           callout('info', t('Only members can vote. Join the union from the Home tab to take part in the next one.')),
-      can('vote.close') ? btn(t('Close voting now'), act(async () => { if (confirm(t('Close voting now? No more ballots can be cast.'))) { await wcall('POST', `/api/ws/votes/${v.id}/close`); render(); } }), { kind: 'secondary small' }) : null);
+      can('vote.close') && v.turnout.voted >= v.turnout.eligible ? btn(t('Close voting now'), act(async () => { if (confirm(t('Close voting now? No more ballots can be cast.'))) { await wcall('POST', `/api/ws/votes/${v.id}/close`); render(); } }), { kind: 'secondary small' }) : null);
   }
   function receiptBox(code) {
     return div({ class: 'callout info' }, p(strong(t('Your receipt code'))), div({ class: 'code small' }, code),
@@ -139,7 +140,7 @@ export async function VoteDetail({ id }) {
       p({ class: 'small muted' }, t('{a} of {b} eligible members voted. {c} ballots counted.', { a: r.voted, b: r.eligible, c: r.total }), r.invalid ? ' ' + t('{n} ballot(s) could not be read and were not counted.', { n: r.invalid }) : ''),
       v.effect && r.passed ? callout('ok', t('This decision has been carried out automatically.')) : null,
       h3(t('Check the count yourself')),
-      S.receipt ? p(receipts.includes(C.receiptHash(S.receipt)) ? '✓ ' + t('Your ballot is in the list of counted ballots.') : '✗ ' + t('Your receipt was NOT found in the list. Tell the committee.')) : null,
+      S.receipt ? p(receipts.includes(C.receiptHash(S.receipt)) ? '✓ ' + t('Your receipt is in the list, so your vote was recorded.') : '✗ ' + t('Your receipt was NOT found in the list. Tell the committee.')) : null,
       div({ class: 'row' }, field(t('Check a receipt code'), textInput({ value: S.check, placeholder: 'ABCD-EFGH-JKMN-PQRS', oninput: (e) => (S.check = e.target.value) })), btn(t('Check'), () => { S.checkResult = receipts.includes(C.receiptHash(S.check)); update(); }, { kind: 'secondary small' })),
       S.checkResult != null ? p(S.checkResult ? '✓ ' + t('That receipt is in the list.') : '✗ ' + t('That receipt is not in the list.')) : null,
       v.keyPublished ? div(btn(t('Recount every ballot in my browser'), act(async () => {
@@ -147,7 +148,7 @@ export async function VoteDetail({ id }) {
         const mine = C.countBallots(pub.votePublicKey, pub.secretKey, pub.ballots, v.options.length);
         S.recount = { counts: mine.counts, same: mine.counts.every((c, i) => c === r.counts[i]), n: pub.ballots.length, receipts: pub.receiptHashes.length };
         update();
-      }), { kind: 'primary small' }), S.recount ? callout(S.recount.same ? 'ok' : 'danger', S.recount.same ? t('Your browser recounted {n} ballots and got exactly the published result.', { n: S.recount.n }) : t('Your recount does NOT match the published result. Raise this with the committee.')) : null)
+      }), { kind: 'primary small' }), S.recount ? callout(S.recount.same ? 'ok' : 'danger', S.recount.same ? t('Your browser recounted {n} ballots and got exactly the published result. That shows the published numbers match the ballots stored on the server; it cannot show that a ballot was never replaced before the key was published.', { n: S.recount.n }) : t('Your recount does NOT match the published result. Raise this with the committee.')) : null)
         : p({ class: 'small muted' }, t('The committee counted privately and did not publish the key, so a recount is not possible for this vote.')));
   }
 }
@@ -158,28 +159,37 @@ export async function TallyPage({ id }) {
   setTitle('Count the ballots', true);
   await C.ready;
   const b = await wcall('GET', `/api/ws/votes/${id}/tally-bundle`);
-  const S = { shares: [], who: [], counts: null, sk: null, publish: true };
+  const S = { shares: [], who: [], signers: [], counts: null, sk: null, publish: true };
   const mine = b.committee.find((c) => c.memberId === WS.memberId);
-  if (mine) { S.shares.push(C.boxOpen(mine.sealed, WS.keys.boxPublicKey, WS.keys.boxSecretKey)); S.who.push(WS.memberId); }
+  if (mine) { S.shares.push(C.boxOpen(mine.sealed, WS.keys.boxPublicKey, WS.keys.boxSecretKey)); S.who.push(WS.memberId); S.signers.push({ memberId: WS.memberId, key: WS.keys.signSecretKey }); }
   return wsFrame('votes', view((update) => {
     if (S.shares.length >= b.thresholdK && !S.sk) {
-      C.reconstructVoteKey(S.shares).then((sk) => { S.sk = sk; S.counts = C.countBallots(b.votePublicKey, sk, b.ballots, b.options.length); update(); }).catch(() => toast(t('Those key files could not open the ballots.'), 'bad'));
+      C.reconstructVoteKey(S.shares).then((sk) => {
+        if (C.publicFromSecret(sk) !== b.votePublicKey) throw new Error('wrong_key'); // the rebuilt key must be the one this vote was opened with
+        S.sk = sk; S.counts = C.countBallots(b.votePublicKey, sk, b.ballots, b.options.length); update();
+      }).catch(() => toast(t('Those key files could not open the ballots.'), 'bad'));
     }
     const ev = S.counts ? evaluateVote(S.counts.counts, b.passRule) : null;
     return div(h1(t('Count the ballots')), p(t('{a} of {k} committee members have contributed.', { a: S.shares.length, k: b.thresholdK })),
       !S.sk ? div({ class: 'card' }, h2(t('Next committee member')), keyFilePicker({
         prefix: 'mk.', format: 'member-keyfile-v1', cta: t('Contribute'), describe: (f) => t('{union} account (…{id})', { union: f.union || 'Union', id: f.memberId.slice(-4) }),
         exclude: (f) => S.who.includes(f.memberId) || f.workspaceId !== WS.workspaceId || !b.committee.some((c) => c.memberId === f.memberId),
-        onUnlock: (file, secrets) => { const m = b.committee.find((c) => c.memberId === file.memberId); S.shares.push(C.boxOpen(m.sealed, secrets.boxPublicKey, secrets.boxSecretKey)); S.who.push(file.memberId); update(); },
+        onUnlock: (file, secrets) => { const m = b.committee.find((c) => c.memberId === file.memberId); S.shares.push(C.boxOpen(m.sealed, secrets.boxPublicKey, secrets.boxSecretKey)); S.who.push(file.memberId); S.signers.push({ memberId: file.memberId, key: secrets.signSecretKey }); update(); },
       })) : div({ class: 'card' }, h2(t('Counted')),
         div({ class: 'bars' }, b.options.map((o, i) => div({ class: 'bar-row' }, span({ class: 'bar-l' }, o), span({ class: 'bar-n' }, S.counts.counts[i])))),
         S.counts.invalid ? p({ class: 'small' }, t('{n} ballot(s) could not be read.', { n: S.counts.invalid })) : null,
         p(ev.passed ? strong(t('This passes.')) : strong(t('This does not pass.'))),
-        label3(t('Publish the ballot key so every member can recount (recommended)'), S.publish, (v) => { S.publish = v; update(); }),
-        p({ class: 'small muted' }, t('Ballots are anonymous, so publishing the key shows how many chose what, never who. It lets any member check the count.')),
+        b.hasEffect
+          ? p({ class: 'small' }, strong(t('The ballot key will be published.')), ' ', t('This decision changes the dues, the rules or who holds a role, so anyone must be able to recount it.'))
+          : label3(t('Publish the ballot key so every member can recount (recommended)'), S.publish, (v) => { S.publish = v; update(); }),
+        p({ class: 'small muted' }, t('Ballots are not linked to voters, so publishing the key shows how many chose what, not who. It lets any member check the count.')),
+        !b.hasEffect && !S.publish ? p({ class: 'small muted' }, t('Without the key nobody can recount. Each of the {k} committee members who counted signs these numbers, and the server accepts them only with all {k} signatures.', { k: b.thresholdK })) : null,
         btn(t('Publish the results'), act(async () => {
-          await wcall('POST', `/api/ws/votes/${id}/results`, { counts: S.counts.counts, ...(S.publish ? { secretKey: S.sk } : {}) });
-          S.sk = null; S.shares.forEach((s) => C.wipe(s)); go(`/w/votes/${id}`);
+          const body = { counts: S.counts.counts };
+          if (b.hasEffect || S.publish) body.secretKey = S.sk;
+          else body.attestations = S.signers.map((s) => ({ memberId: s.memberId, signature: C.signTally(s.key, id, S.counts.counts) }));
+          await wcall('POST', `/api/ws/votes/${id}/results`, body);
+          S.sk = null; S.signers = []; S.shares.forEach((s) => C.wipe(s)); go(`/w/votes/${id}`);
         }), { kind: 'primary block' })));
   }));
 }

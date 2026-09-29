@@ -20,8 +20,10 @@ export function verifyChain(entries, fieldsOf, { anchored = true } = {}) {
 }
 
 // Compare what the server shows now with the head this device pinned on an earlier visit.
+// `entries` may be only the newest window of a long log: a pin older than the window cannot be compared (`unchecked`), but one inside it must match.
 export function checkPinned(entries, pin) {
-  if (!pin) return { ok: true };
+  if (!pin) return { ok: true, first: true };
+  if (entries.length && pin.seq < entries[0].seq) return { ok: true, unchecked: true };
   const e = entries.find((x) => x.seq === pin.seq);
   if (!e) return { ok: false, why: 'missing' }; // history was cut back
   return e.hash === pin.hash ? { ok: true } : { ok: false, why: 'changed' }; // history was rewritten

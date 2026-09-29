@@ -68,13 +68,16 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
   async function enroll(page, link, index) {
     await page.goto(link);
     await page.locator('.passphrase').waitFor();
+    assert.equal(await page.evaluate(() => location.hash), ''); // the link's secrets are not left in the address bar or the history
     const pass = (await page.locator('.passphrase').innerText()).trim();
     const keyFile = await saveDownload(page, () => btn(page, 'Create my key file').click(), `trustee-${index}.json`);
     await shot(page, '03-trustee-enroll-' + index);
     await page.locator('.check input').check();
     await btn(page, 'Finish enrollment').click();
     await page.getByRole('heading', { name: 'You are enrolled' }).waitFor();
-    trustee[index] = { keyFile, pass };
+    const words = (await page.locator('.keywords').first().innerText()).trim(); // what this trustee reads aloud to the founder
+    assert.equal(words.split('-').length, 10);
+    trustee[index] = { keyFile, pass, words };
   }
   async function unlockDashboard(page, index) {
     await page.goto('/t/dashboard');
@@ -88,6 +91,7 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
     (page, link, who) {
     await page.goto(link);
     await btn(page, 'Read the card').click();
+    assert.equal(await page.evaluate(() => location.hash), ''); // the invitation's secrets are not left in the address bar or the history
     await page.getByLabel('Full legal name').fill(who.name);
     await page.getByLabel('Personal email').fill(who.email);
     await page.getByLabel('Mobile phone').fill(who.phone);
@@ -185,7 +189,7 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
     await page.getByText(/That code is not right/).waitFor();
     await rows.nth(0).locator('input').fill(vouchB.toLowerCase());
     await rows.nth(0).getByRole('button', { name: 'Confirm' }).click();
-    await page.getByText('Confirmed.', { exact: true }).waitFor(); // exact: the lock's own copy also says "been confirmed."
+    await page.getByText('Confirmed.', { exact: true }).waitFor(); // exact: other copy on the page also mentions confirmation
     await page.waitForFunction(() => document.querySelectorAll('.vouch').length === 1);
     // the lock is enforced: only 2 of the 3 people needed are confirmed, so even the founder is handed nothing to open
     await page.goto('/t/unlock');
@@ -247,9 +251,21 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
       const link = (await page.locator('.invite-box .link-box').first().innerText()).trim();
       assert.match(link, /\/t#e=.+&k=.+&c=.+/);
       await enroll(page, link, idx);
+      if (idx === 2) { // a trustee who is not the founder cannot hand out the seat that is still empty
+        await unlockDashboard(page, 2);
+        await page.getByRole('heading', { name: 'Your committee' }).waitFor();
+        await page.getByText('Trustee 1 sends this invitation.').waitFor();
+        assert.equal(await btn(page, 'Get invite link').count(), 0);
+      }
       await unlockDashboard(page, 1);
     }
     await page.getByText(/Everyone has joined. Now lock your early cards to the committee/).waitFor();
+    // The lock stays off until the founder has checked each trustee's key words with them. The words on the founder's screen come from the keys
+    // the server holds, so they must equal what each trustee saw on their own screen.
+    assert.equal(await btn(page, /Lock \d+ existing card/).isDisabled(), true);
+    for (const idx of [2, 3]) await page.locator('.keycheck', { hasText: trustee[idx].words }).locator('input[type=checkbox]').check();
+    await shot(page, '06c-key-words');
+    assert.equal(await btn(page, /Lock \d+ existing card/).isDisabled(), false);
     await btn(page, /Lock \d+ existing card/).click();
     await page.getByText('Done. Any 2 of 3 trustees are now needed to open the cards.').waitFor(); // the re-lock has really finished
     await page.locator('.callout.ok', { hasText: 'Any 2 of 3 trustees together can open the cards.' }).waitFor();
@@ -386,7 +402,7 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
     const dan = pages['ws-Dan'];
     await nav(dan, 'Votes');
     await dan.getByRole('link', { name: 'Set our monthly dues' }).click();
-    await dan.getByText(/Your ballot is in the list of counted ballots/).waitFor();
+    await dan.getByText(/Your receipt is in the list, so your vote was recorded/).waitFor();
     assert.deepEqual(problems, []);
   });
 

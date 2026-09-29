@@ -133,8 +133,11 @@ export function openReport(report, trusteeIndex, boxPublicKey, boxSecretKey) {
 export const GENESIS = 'GENESIS';
 export const sha256Text = (s) => sha256b64(utf8(s));
 export const chainHash = (prev, fields) => sha256b64(utf8(prev + '|' + canonicalJson(fields)));
-// A fingerprint short enough to read aloud: "compare this with a coworker".
-export const fingerprint = (hash) => (hash || '').slice(0, 8).toUpperCase().replace(/[-_]/g, 'X').replace(/(.{4})/, '$1-');
+// A fingerprint short enough to read aloud ("compare this with a coworker") but long enough that nobody can grind out a forged history that shows the
+// same one: 80 bits, as 20 hex digits in groups of four. (The old eight base64 characters, case-folded, were only about 40 bits: hours on a graphics card.)
+export const fingerprint = (hash) => {
+  try { return sodium.to_hex(unb64(hash).subarray(0, 10)).toUpperCase().replace(/(.{4})(?=.)/g, '$1-'); } catch { return ''; }
+};
 
 // ---------- word-based codes ----------
 const word = () => WORDS[sodium.randombytes_uniform(WORDS.length)];
@@ -143,6 +146,15 @@ export const vouchCode = () => (word() + '-' + word()).toUpperCase();
 export const normalizeCode = (c) => String(c).trim().toUpperCase().replace(/[\s_]+/g, '-');
 export const vouchHash = (cardId, code) => sha256b64(utf8('vouch|' + cardId + '|' + normalizeCode(code)));
 export const passphraseOk = (p) => typeof p === 'string' && (p.length >= 14 || p.trim().split(/[\s-]+/).length >= 4 && p.length >= 12);
+
+// Words that stand for a public key, so two people can check it aloud ("read me the words on your screen"). They identify a key and are
+// not secret. The list has 205 words (about 7.7 bits each), so ten words are about 77 bits: enough that nobody can grind out a different
+// key that shows the same words. Fewer would not be, which is why this is not the 6-word passphrase length.
+export const keyWords = (publicKeyB64) => {
+  if (typeof publicKeyB64 !== 'string' || publicKeyB64.length < 20) throw new Error('keyWords needs a public key'); // never let a missing key "match" another missing key
+  const h = sodium.crypto_hash_sha256(utf8('ludlow key words v1|' + publicKeyB64));
+  return Array.from({ length: 10 }, (_, i) => WORDS[((h[3 * i] << 16) | (h[3 * i + 1] << 8) | h[3 * i + 2]) % WORDS.length]).join('-');
+};
 
 // ---------- card encryption (Section 5.2 of the spec) ----------
 export async function encryptCard({ campaignId, templateVersion, payload, trustees, k }) {
@@ -180,9 +192,21 @@ export async function reshareCard(sealedSolo, founderKeys, trustees, k) {
   return sealed;
 }
 export const openShare = (sealed, boxPublicKey, boxSecretKey) => boxOpen(sealed, boxPublicKey, boxSecretKey);
+// A share is the secret's length plus one byte: the x coordinate. x = 0 would BE the secret (the polynomial's value at zero), so combine() returns
+// whatever bytes a sender puts in an x = 0 "share". Refuse those, wrong lengths, and the same share twice, before combining anything.
+function checkShares(shares, secretLen = 32) {
+  if (!Array.isArray(shares) || shares.length < 2) throw new Error('bad_shares');
+  const xs = new Set();
+  for (const s of shares) {
+    if (!(s instanceof Uint8Array) || s.length !== secretLen + 1 || s[s.length - 1] === 0) throw new Error('bad_shares');
+    xs.add(s[s.length - 1]);
+  }
+  if (xs.size !== shares.length) throw new Error('bad_shares');
+}
 export async function decryptCard({ campaignId, templateVersion, ciphertext, nonce }, shares) {
   let cardKey;
   try {
+    checkShares(shares);
     cardKey = await combine(shares);
     return openJson(cardKey, { nonce, ciphertext }, campaignId + '|' + templateVersion);
   } catch { throw new Error('unlock_failed'); }
@@ -194,6 +218,14 @@ const authMsg = ({ nonce, route, scope }) => utf8(`${nonce}|${route}|${scope}`);
 export const signAuth = (signSecretKey, parts) => b64(sodium.crypto_sign_detached(authMsg(parts), unb64(signSecretKey)));
 export function verifyAuth(signPublicKey, sig, parts) {
   try { return sodium.crypto_sign_verify_detached(unb64(sig), authMsg(parts), unb64(signPublicKey)); } catch { return false; }
+}
+
+// A committee member signs the counts they saw. When the ballot key is not published the server cannot recount, so it requires k different
+// committee members to stand behind the same counts. The message names the vote and the domain, so a signature cannot be reused for anything else.
+const tallyMsg = (voteId, counts) => utf8(`ludlow tally v1|${voteId}|${counts.join(',')}`);
+export const signTally = (signSecretKey, voteId, counts) => b64(sodium.crypto_sign_detached(tallyMsg(voteId, counts), unb64(signSecretKey)));
+export function verifyTally(signPublicKey, sig, voteId, counts) {
+  try { return sodium.crypto_sign_verify_detached(unb64(sig), tallyMsg(voteId, counts), unb64(signPublicKey)); } catch { return false; }
 }
 
 // ---------- secret ballots ----------
@@ -218,7 +250,7 @@ export function castBallot(votePublicKey, optionIndex) {
   const receiptCode = raw.match(/.{4}/g).join('-');
   return { ciphertext, receiptCode, receiptHash: receiptHash(receiptCode) };
 }
-export async function reconstructVoteKey(shares) { const sk = await combine(shares); const out = b64(sk); wipe(sk); return out; }
+export async function reconstructVoteKey(shares) { checkShares(shares); const sk = await combine(shares); const out = b64(sk); wipe(sk); return out; }
 export function countBallots(votePublicKey, voteSecretKey, ballots, nOptions) {
   const counts = Array(nOptions).fill(0); let invalid = 0;
   for (const ct of ballots) {
