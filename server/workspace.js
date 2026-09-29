@@ -2,7 +2,7 @@
 // campaign system (named members, roles, encryption at rest, audit log) and no table is shared with it.
 // Every route below is registered through W(), which authenticates, checks the permission matrix in
 // shared/permissions.js, and (for recognized-only modules) checks the workspace stage.
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomInt } from 'node:crypto';
 import { fail } from './http.js';
 import { hashToken, newToken, verifyAuth, verifyTally, publicFromSecret, countBallots, chainHash, sha256Text, GENESIS, b64, randomBytes } from '../shared/crypto.js';
 import { takeChallenge, bearer } from './auth.js';
@@ -372,6 +372,21 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     return { voteId: id };
   });
 
+  // Rewrites one vote's ballots and receipts in a random order. SQLite places each new row below the previous one inside its page, so without this the
+  // order they sit on disk IS the order people voted in, and a copy of the database (a backup, a subpoena) could line ballots up with the times members
+  // were seen. secure_delete is on, so the old layout is zeroed rather than left behind. Cheap at a union's size: it moves one vote's rows, once per cast.
+  function scrambleVote(voteId) {
+    const shuffled = (rows) => { for (let i = rows.length - 1; i > 0; i--) { const j = randomInt(i + 1); [rows[i], rows[j]] = [rows[j], rows[i]]; } return rows; };
+    const ballots = shuffled(db.prepare('SELECT id, choice_ciphertext c FROM ws_ballots WHERE vote_id=?').all(voteId));
+    const receipts = shuffled(db.prepare('SELECT receipt_hash h FROM ws_vote_receipts WHERE vote_id=?').all(voteId));
+    db.prepare('DELETE FROM ws_ballots WHERE vote_id=?').run(voteId);
+    db.prepare('DELETE FROM ws_vote_receipts WHERE vote_id=?').run(voteId);
+    const addBallot = db.prepare('INSERT INTO ws_ballots (id,vote_id,choice_ciphertext) VALUES (?,?,?)');
+    for (const b of ballots) addBallot.run(b.id, voteId, b.c);
+    const addReceipt = db.prepare('INSERT INTO ws_vote_receipts (vote_id,receipt_hash) VALUES (?,?)');
+    for (const r of receipts) addReceipt.run(voteId, r.h);
+  }
+
   // Casting a ballot: one transaction that (1) marks the voter as having voted and (2) stores an
   // encrypted ballot with NO reference to the voter and NO timestamp. Nothing here is logged with an identity.
   W('POST', '/api/ws/votes/:id/ballot', 'vote.cast', ({ me, params, body: b }) => {
@@ -386,6 +401,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
         }
         db.prepare('INSERT INTO ws_ballots (id,vote_id,choice_ciphertext) VALUES (?,?,?)').run(randomUUID(), v.id, b.ciphertext);
         db.prepare('INSERT INTO ws_vote_receipts (vote_id,receipt_hash) VALUES (?,?)').run(v.id, b.receiptHash);
+        scrambleVote(v.id); // so the rows on disk do not spell out who voted first
       })();
     } catch (e) { if (e?.status) throw e; constraint(e); }
     return { cast: true };

@@ -5,6 +5,7 @@ import * as D from '../shared/deadlines.js';
 import { verifyChain, ledgerFields, auditFields, checkPinned } from '../shared/verify.js';
 import { can, ROLES } from '../shared/permissions.js';
 import { startApp, makeWorkspace, login } from './helpers.js';
+import { physicalOrder } from './sqlite-pages.js';
 
 const person = (name, i, extra = {}) => ({ name, email: `${name.split(' ')[0].toLowerCase()}+leak@example.com`, phone: `+155501990${i}0`, address: `${i} Leakcheck Lane`, jobTitle: 'Leakcheck Barista', status: 'member', shift: i < 6 ? 'Day' : 'Night', ...extra });
 const PEOPLE = [
@@ -206,7 +207,7 @@ describe('workspace: secret ballots and self-executing votes', () => {
     assert.deepEqual(cols('ws_vote_participation'), ['vote_id', 'member_id', 'has_voted']);
     for (const t of ['ws_ballots', 'ws_vote_receipts']) assert.deepEqual(h.app.db.prepare(`SELECT "table" t FROM pragma_foreign_key_list('${t}')`).all().map((r) => r.t), ['ws_votes']);
     const sql = h.app.db.prepare("SELECT sql FROM sqlite_master WHERE name='ws_ballots'").get().sql;
-    assert.match(sql, /WITHOUT ROWID/); // stored in random-id order, so row order does not reveal cast order
+    assert.match(sql, /WITHOUT ROWID/); // sorted by a random id, so the logical order says nothing. (The physical order on disk still would, which is why every cast rewrites the vote's rows in random order; see "the order people voted in is not left on disk".)
     const ballotLogs = h.logs.filter((l) => l.includes('/ballot'));
     assert.ok(ballotLogs.length >= 8);
     for (const l of ballotLogs) for (const m of ws.members) assert.ok(!l.includes(m.id) && !l.includes(m.token));
@@ -377,6 +378,37 @@ describe('workspace: one person cannot make up a result, or take power alone', (
     await tally(ws, 1, vote, [1, 3]);
     const done = (await ws.as(0, 'GET', '/api/ws/export')).json.votes.find((v) => v.id === vote.id);
     assert.equal(done.ballots.length, 1); // after the count they are part of the record
+  });
+});
+
+describe('workspace: the order people voted in is not left on disk', () => {
+  let h, ws;
+  const BIG = Array.from({ length: 20 }, (_, i) => person(`Voter${i} Qqqperson`, i, i === 0 ? { roles: ['officer', 'election_committee'] } : i < 3 ? { roles: ['election_committee'] } : {}));
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, BIG); });
+  after(() => h.stop());
+
+  it('a copy of the database does not show which ballot or receipt came first', async () => {
+    const vote = await openVote(ws, 0, { title: 'Order test', type: 'general', options: ['Yes', 'No'] });
+    const order = BIG.map((_, i) => i).sort(() => C.randomBytes(1)[0] - 128); // people vote in an arbitrary order
+    const cts = [], rhs = [], who = [];
+    for (const i of order) {
+      const b = C.castBallot(vote.votePublicKey, i % 2);
+      assert.equal((await ws.as(i, 'POST', `/api/ws/votes/${vote.id}/ballot`, { ciphertext: b.ciphertext, receiptHash: b.receiptHash })).status, 200);
+      cts.push(b.ciphertext); rhs.push(b.receiptHash); who.push(ws.members[i].id);
+    }
+    // what someone holding a copy of the file can read: the rows in the order they sit on disk (inside a page the newest cell sits lowest)
+    const ballots = physicalOrder(h, 'ws_ballots', (v) => v[1] === vote.id).flat().map((v) => v[2]);
+    const receipts = physicalOrder(h, 'ws_vote_receipts', (v) => v[0] === vote.id).flat().map((v) => v[1]);
+    const voted = physicalOrder(h, 'ws_vote_participation', (v) => v[0] === vote.id && v[2] === 1).flat().map((v) => v[1]);
+    assert.deepEqual([ballots.length, receipts.length, voted.length], [20, 20, 20]);
+    const mirror = (a) => [...a].reverse();
+    for (const [name, onDisk, cast] of [['ballots', ballots, cts], ['receipts', receipts, rhs], ['who has voted', voted, who]]) {
+      assert.notDeepEqual(onDisk, cast, `${name} sit in cast order`);
+      assert.notDeepEqual(onDisk, mirror(cast), `${name} sit in reverse cast order`);
+    }
+    // scrambling only moves rows: everything is still there, and the count still works
+    assert.deepEqual([...ballots].sort(), [...cts].sort());
+    assert.deepEqual([...receipts].sort(), [...rhs].sort());
   });
 });
 
