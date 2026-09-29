@@ -292,7 +292,7 @@ describe('campaign: one person can start alone and add the committee later', () 
     assert.throws(() => C.openShare(bundle[0].sealedShares[0].sealed, stranger.boxPublicKey, stranger.boxSecretKey));
   });
 
-  it('reports go to the trustees who have joined so far', async () => {
+  it('until the founder has signed the roster, reports go to the founder alone', async () => {
     const id = crypto.randomUUID();
     const mk = (ts) => C.sealForTrustees({ what: 'x' }, ts.map((t) => ({ index: t.index, boxPublicKey: t.keys?.boxPublicKey || C.newKeypairs().boxPublicKey })), id);
     assert.equal((await h.call('POST', '/api/reports', { auth: A.auth, body: { id, ...mk([{ index: 1, keys: camp.trustees[0].keys }, { index: 2 }, { index: 3 }]) } })).json.error, 'committee_changed');
@@ -339,22 +339,68 @@ describe('campaign: one person can start alone and add the committee later', () 
     assert.equal((await enrollTrustee(h, c2, 2)).r.status, 200);
   });
 
-  it('when everyone has joined, new cards are k-of-n, and the founder locks the early ones to the committee', async () => {
+  it('when everyone has joined but the founder has not signed the roster, cards are still sealed to the founder alone', async () => {
     const before = await h.call('GET', `/api/campaigns/${camp.id}/progress`, { auth: await tAuth(1, 'GET /api/campaigns/:id/progress') });
     assert.equal(before.json.solo, 2);
+    const rosterOf = (ts) => ({ campaignId: camp.id, k: 2, n: 3, seats: [1, 2, 3].map((i) => ({ index: i, boxPublicKey: ts.find((t) => t.index === i)?.keys.boxPublicKey || C.newKeypairs().boxPublicKey })) });
+    const early = rosterOf(camp.trustees);
+    assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/roster`, { auth: await tAuth(1, 'POST /api/campaigns/:id/roster'), body: { roster: early, signature: C.signRoster(camp.trustees[0].keys.signSecretKey, early) } })).json.error, 'committee_incomplete'); // someone has not joined
     const j = await enrollTrustee(h, camp, 3);
     assert.equal(j.r.json.committeeComplete, true);
     assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/committee`, { auth: await tAuth(1, 'POST /api/campaigns/:id/committee'), body: { n: 3, k: 2 } })).json.error, 'committee_complete');
+    // every trustee has joined, but nobody vouched for their keys: a browser cannot tell them from a server's inventions, so it still seals to the founder alone
     const inv = await makeInvite(h, camp, { kind: 'direct' });
-    const late = await signCard(h, camp, inv.token, { name: 'Cara Cruz', email: 'c@example.org', phone: '+15550100003' });
-    assert.equal(late.res.status, 200);
+    const still = await signCard(h, camp, inv.token, { name: 'Cara Cruz', email: 'c@example.org', phone: '+15550100003' });
+    assert.equal(still.res.status, 200, JSON.stringify(still.res.json));
+    assert.equal(h.app.db.prepare('SELECT seal_mode m FROM cards WHERE id=?').get(still.cardId).m, 'solo');
+    // ...and a k-of-n card is refused until the founder has signed
+    const shamir = await C.encryptCard({ campaignId: camp.id, templateVersion: 'card-v1', payload: { x: 1 }, trustees: camp.trustees.map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey })), k: 2 });
+    const inv2 = await makeInvite(h, camp, { kind: 'direct' });
+    assert.equal((await h.call('POST', '/api/cards', { body: { cardId: crypto.randomUUID(), inviteToken: inv2.token, ...shamir, memberTokenHash: C.hashToken(C.newToken()), disavowTokenHash: C.hashToken(C.newToken()) } })).json.error, 'committee_changed');
+    // the early cards cannot be re-locked yet either: the founder signs first, so that the set of solo cards stops growing
+    const rb = await h.call('GET', `/api/campaigns/${camp.id}/reshare-bundle`, { auth: await tAuth(1, 'GET /api/campaigns/:id/reshare-bundle') });
+    assert.equal(rb.json.cards.length, 3);
+    assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/reshare`, { auth: await tAuth(1, 'POST /api/campaigns/:id/reshare'), body: { cards: [{ cardId: rb.json.cards[0].id, sealedShares: [] }] } })).json.error, 'roster_not_confirmed');
+  });
+
+  it('the founder signs the roster: only the founder, only the committee the server holds, only with a valid signature', async () => {
+    const F = camp.trustees[0].keys;
+    const good = { campaignId: camp.id, k: 2, n: 3, seats: [...camp.trustees].sort((a, b) => a.index - b.index).map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey })) };
+    const sig = C.signRoster(F.signSecretKey, good);
+    const post = async (i, body) => h.call('POST', `/api/campaigns/${camp.id}/roster`, { auth: await tAuth(i, 'POST /api/campaigns/:id/roster'), body });
+    const stored = () => h.app.db.prepare('SELECT roster_json j FROM campaigns WHERE id=?').get(camp.id).j;
+    assert.equal((await post(2, { roster: good, signature: sig })).json.error, 'founder_only'); // a trustee cannot confirm a committee (or sign for the founder)
+    assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/roster`, { body: { roster: good, signature: sig } })).status, 401);
+    const swapped = { ...good, seats: good.seats.map((s) => (s.index === 2 ? { ...s, boxPublicKey: C.newKeypairs().boxPublicKey } : s)) };
+    assert.equal((await post(1, { roster: swapped, signature: C.signRoster(F.signSecretKey, swapped) })).json.error, 'roster_mismatch'); // names a key the server does not hold for that seat
+    assert.equal((await post(1, { roster: { ...good, k: 3 }, signature: C.signRoster(F.signSecretKey, { ...good, k: 3 }) })).json.error, 'roster_mismatch'); // a different threshold
+    assert.equal((await post(1, { roster: { ...good, campaignId: crypto.randomUUID() }, signature: sig })).json.error, 'roster_mismatch'); // another campaign
+    assert.equal((await post(1, { roster: good, signature: C.signRoster(camp.trustees[1].keys.signSecretKey, good) })).json.error, 'bad_signature'); // not the founder's signature
+    assert.equal((await post(1, { roster: good, signature: 'not a signature' })).json.error, 'bad_signature');
+    assert.equal((await post(1, { roster: 'x', signature: sig })).status, 400);
+    assert.equal((await post(1, { roster: good })).status, 400);
+    assert.equal(stored(), null); // none of that stored anything
+    assert.equal((await post(1, { roster: good, signature: sig })).json.confirmed, true);
+    assert.deepEqual((await post(1, { roster: good, signature: sig })).json, { confirmed: true, already: true }); // a retry is fine
+    // the server now serves the founder's signing key and the roster, which anyone can verify without trusting it
+    const meta = (await h.call('GET', `/api/campaigns/${camp.id}/meta`, { auth: await tAuth(2, 'GET /api/campaigns/:id/meta') })).json;
+    assert.equal(meta.trustees[0].signPublicKey, F.signPublicKey);
+    assert.deepEqual(meta.roster, { roster: good, signature: sig });
+    assert.ok(C.verifyRoster(meta.trustees[0].signPublicKey, meta.roster.signature, meta.roster.roster));
+    camp.confirmed = true;
+  });
+
+  it('once the roster is signed, new cards are k-of-n, and the founder locks the early ones to the committee', async () => {
+    const inv = await makeInvite(h, camp, { kind: 'direct' });
+    const late = await signCard(h, camp, inv.token, { name: 'Dee Diaz', email: 'd@example.org', phone: '+15550100004' });
+    assert.equal(late.res.status, 200, JSON.stringify(late.res.json));
     assert.equal(h.app.db.prepare('SELECT seal_mode m FROM cards WHERE id=?').get(late.cardId).m, 'shamir');
     const solo = C.encryptCardSolo({ campaignId: camp.id, templateVersion: 'card-v1', payload: { x: 1 }, founder: { index: 1, boxPublicKey: camp.trustees[0].keys.boxPublicKey } });
     const inv2 = await makeInvite(h, camp, { kind: 'direct' });
     assert.equal((await h.call('POST', '/api/cards', { body: { cardId: crypto.randomUUID(), inviteToken: inv2.token, ...solo, memberTokenHash: C.hashToken(C.newToken()), disavowTokenHash: C.hashToken(C.newToken()) } })).json.error, 'committee_changed');
 
     const rb = await h.call('GET', `/api/campaigns/${camp.id}/reshare-bundle`, { auth: await tAuth(1, 'GET /api/campaigns/:id/reshare-bundle') });
-    assert.equal(rb.json.cards.length, 2);
+    assert.equal(rb.json.cards.length, 3);
     assert.ok(rb.json.cards.every((c) => Object.keys(c).sort().join() === 'id,sealedShares')); // no ciphertext: reshaping cannot be used to read cards
     assert.equal((await h.call('GET', `/api/campaigns/${camp.id}/reshare-bundle`, { auth: await tAuth(2, 'GET /api/campaigns/:id/reshare-bundle') })).json.error, 'founder_only');
     const trustees = camp.trustees.map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey }));
@@ -364,19 +410,28 @@ describe('campaign: one person can start alone and add the committee later', () 
     assert.equal((await reshare(2, { cards })).json.error, 'founder_only'); // a rogue trustee could only destroy cards
     assert.equal((await reshare(1, { cards: [{ cardId: cards[0].cardId, sealedShares: cards[0].sealedShares.slice(0, 2) }] })).json.error, 'bad_shares');
     for (const junk of [null, 'x', {}, 7]) assert.equal((await reshare(1, { cards: [{ cardId: cards[0].cardId, sealedShares: junk }] })).status, 400, String(junk)); // malformed input is a 400, never a crash
-    assert.deepEqual((await reshare(1, { cards })).json, { converted: 2, remaining: 0 });
+    assert.deepEqual((await reshare(1, { cards })).json, { converted: 3, remaining: 0 });
     assert.equal((await reshare(1, { cards: [cards[0]] })).json.error, 'not_solo');
 
     // now trustees 2 and 3 can open the early cards WITHOUT the founder, and the founder alone cannot
     const bundle = (await h.call('GET', `/api/campaigns/${camp.id}/export-bundle`, { auth: await tAuth(2, 'GET /api/campaigns/:id/export-bundle') })).json.cards;
-    assert.equal(bundle.length, 3);
+    assert.equal(bundle.length, 4);
     assert.ok(bundle.every((c) => c.sealMode === 'shamir' && c.sealedShares.length === 3));
     const sh = (c, i) => { const t = camp.trustees.find((x) => x.index === i).keys; return C.openShare(c.sealedShares.find((s) => s.trusteeIndex === i).sealed, t.boxPublicKey, t.boxSecretKey); };
     const ctx = (c) => ({ campaignId: camp.id, templateVersion: c.templateVersion, ciphertext: c.ciphertext, nonce: c.nonce });
     const opened = [];
     for (const c of bundle) opened.push((await C.decryptCard(ctx(c), [sh(c, 2), sh(c, 3)])).legalName);
-    assert.deepEqual(opened.sort(), ['Alice Anderson', 'Bob Baker', 'Cara Cruz']);
+    assert.deepEqual(opened.sort(), ['Alice Anderson', 'Bob Baker', 'Cara Cruz', 'Dee Diaz']);
     await assert.rejects(C.decryptCard(ctx(bundle[0]), [sh(bundle[0], 1)]));
+  });
+
+  it('reports go to the founder alone until the roster is signed, and to every trustee after', async () => {
+    const id = () => crypto.randomUUID();
+    const mk = (idxs, rid) => C.sealForTrustees({ what: 'x' }, idxs.map((i) => ({ index: i, boxPublicKey: camp.trustees.find((t) => t.index === i).keys.boxPublicKey })), rid);
+    const send = (idxs) => { const rid = id(); return h.call('POST', '/api/reports', { auth: A.auth, body: { id: rid, ...mk(idxs, rid) } }); };
+    assert.equal((await send([1, 2, 3])).status, 200); // signed: every trustee
+    assert.equal((await send([1])).json.error, 'committee_changed'); // the founder alone is no longer the whole committee
+    assert.equal((await send([1, 2])).json.error, 'committee_changed');
   });
 });
 

@@ -11,6 +11,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { zip, crc32, csvCell, toCsv } from '../web/src/zip.js';
 import { verifyChain, auditFields, checkPinned } from '../shared/verify.js';
+import { authenticate, rosterToSign, checkMySeat, RosterError } from '../shared/roster.js';
 
 await C.ready;
 const flip = (s) => s.slice(0, -2) + (s.at(-2) === 'A' ? 'B' : 'A') + s.at(-1);
@@ -335,4 +336,141 @@ test('names that go into Markdown cannot turn into links, emphasis or code', asy
   assert.equal(plainMd('Riverside Workers United'), 'Riverside Workers United'); // ordinary names are untouched
   assert.equal(plainMd('Local  42\n  (Cooks)'), 'Local 42 Cooks');
   assert.equal(plainMd(null), '');
+});
+
+// ---- the founder's key check and the signed roster: a lying server must not make a genuine browser seal to a key of its own ----
+const rosterWorld = (n = 3, k = 2) => {
+  const ts = trustees(n);
+  const commit = C.founderCommit(ts[0].keys.boxPublicKey, ts[0].keys.signPublicKey);
+  const listed = (enrolled = n) => ts.map((t, i) => ({ index: t.index, enrolled: i < enrolled, boxPublicKey: i < enrolled ? t.keys.boxPublicKey : null, signPublicKey: i < enrolled ? t.keys.signPublicKey : null }));
+  const roster = { campaignId: 'camp-1', k, n, seats: ts.map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey })) };
+  const signed = { roster, signature: C.signRoster(ts[0].keys.signSecretKey, roster) };
+  const raw = (over = {}) => ({ n, k, trustees: listed(), roster: signed, ...over });
+  return { ts, commit, listed, roster, signed, raw };
+};
+const refuses = (fn, code) => assert.throws(fn, (e) => e instanceof RosterError && e.code === code, `expected ${code}`);
+
+test('founder key check: 128 bits over both public keys, so neither can be swapped', () => {
+  const a = C.newKeypairs(), b = C.newKeypairs();
+  const c = C.founderCommit(a.boxPublicKey, a.signPublicKey);
+  assert.match(c, /^[A-Za-z0-9_-]{22}$/);
+  assert.equal(c, C.founderCommit(a.boxPublicKey, a.signPublicKey));
+  assert.notEqual(c, C.founderCommit(b.boxPublicKey, a.signPublicKey)); // a different box key
+  assert.notEqual(c, C.founderCommit(a.boxPublicKey, b.signPublicKey)); // a different signing key
+  assert.notEqual(c, C.founderCommit(a.signPublicKey, a.boxPublicKey)); // order matters
+});
+
+test('roster signatures: bound to the exact committee, the campaign and the threshold; nothing else the founder signs can be a roster', () => {
+  const w = rosterWorld(), F = w.ts[0].keys;
+  assert.ok(C.verifyRoster(F.signPublicKey, w.signed.signature, w.roster));
+  const forge = (edit) => C.verifyRoster(F.signPublicKey, w.signed.signature, edit(structuredClone(w.roster)));
+  assert.ok(!forge((r) => { r.seats[1].boxPublicKey = C.newKeypairs().boxPublicKey; return r; })); // a swapped trustee key
+  assert.ok(!forge((r) => { r.k = 3; return r; })); // a changed threshold
+  assert.ok(!forge((r) => { r.campaignId = 'camp-2'; return r; })); // another campaign
+  assert.ok(!forge((r) => { r.seats.reverse(); return r; })); // reordered
+  assert.ok(!forge((r) => { r.seats.pop(); r.n = 2; return r; })); // a smaller committee
+  assert.ok(!C.verifyRoster(w.ts[1].keys.signPublicKey, w.signed.signature, w.roster)); // signed by someone else
+  assert.ok(C.verifyRoster(F.signPublicKey, w.signed.signature, { ...w.roster, extra: 'ignored' })); // unknown fields are not signed and change nothing
+  // the same key signs sign-in challenges and tallies: neither can be replayed as a roster
+  assert.ok(!C.verifyRoster(F.signPublicKey, C.signAuth(F.signSecretKey, { nonce: 'n', route: 'POST /api/campaigns/:id/roster', scope: 'camp-1' }), w.roster));
+  assert.ok(!C.verifyRoster(F.signPublicKey, C.signTally(F.signSecretKey, 'camp-1', [2, 1]), w.roster));
+  // malformed rosters are refused whatever the signature says
+  const bad = [{ ...w.roster, k: 1 }, { ...w.roster, k: 4 }, { ...w.roster, n: 4 }, { ...w.roster, seats: [w.roster.seats[0], w.roster.seats[0], w.roster.seats[2]] },
+    { ...w.roster, seats: w.roster.seats.map((s) => ({ ...s, index: s.index + 1 })) }, { ...w.roster, campaignId: 7 }, null, 'x'];
+  for (const r of bad) assert.ok(!C.verifyRoster(F.signPublicKey, C.signRoster(F.signSecretKey, w.roster), r));
+});
+
+test('a signer before the committee is confirmed seals to the founder alone, and only if the founder\'s keys match the link', () => {
+  const w = rosterWorld();
+  const a = authenticate(w.raw({ roster: null, trustees: w.listed(1) }), w.commit, 'camp-1');
+  assert.deepEqual([a.mode, a.seats.length, a.seats[0].boxPublicKey, a.k], ['solo', 1, w.ts[0].keys.boxPublicKey, null]);
+  // the server swaps the founder's keys, one at a time and both: the link's check no longer matches
+  const evil = C.newKeypairs();
+  for (const swap of [{ boxPublicKey: evil.boxPublicKey }, { signPublicKey: evil.signPublicKey }, { boxPublicKey: evil.boxPublicKey, signPublicKey: evil.signPublicKey }]) {
+    refuses(() => authenticate(w.raw({ roster: null, trustees: w.listed(1).map((x, i) => (i === 0 ? { ...x, ...swap } : x)) }), w.commit, 'camp-1'), 'founder_mismatch');
+  }
+  refuses(() => authenticate(w.raw({ roster: null, trustees: w.listed(1) }), undefined, 'camp-1'), 'no_commit'); // a link without a key check cannot be verified
+  refuses(() => authenticate(w.raw({ roster: null, trustees: w.listed(1) }), 'short', 'camp-1'), 'no_commit');
+  refuses(() => authenticate(w.raw({ roster: null, trustees: w.listed(0) }), w.commit, 'camp-1'), 'no_founder');
+  refuses(() => authenticate(w.raw({ roster: null, trustees: [] }), w.commit, 'camp-1'), 'no_founder');
+  // enrolled trustees the founder has not signed for yet are NOT sealed to, even if everyone has joined
+  const unconfirmed = authenticate(w.raw({ roster: null }), w.commit, 'camp-1');
+  assert.deepEqual([unconfirmed.mode, unconfirmed.seats.length], ['solo', 1]);
+});
+
+test('once the founder has signed the roster, a signer seals to that committee and to nothing the server adds or swaps', () => {
+  const w = rosterWorld(3, 2);
+  const a = authenticate(w.raw(), w.commit, 'camp-1');
+  assert.deepEqual([a.mode, a.k, a.seats.map((s) => s.index)], ['shamir', 2, [1, 2, 3]]);
+  assert.deepEqual(a.seats.map((s) => s.boxPublicKey), w.ts.map((t) => t.keys.boxPublicKey));
+  const evil = C.newKeypairs();
+  // the server swaps a trustee's key in its list only: what was signed still wins, and the difference is reported
+  refuses(() => authenticate(w.raw({ trustees: w.listed().map((x) => (x.index === 2 ? { ...x, boxPublicKey: evil.boxPublicKey } : x)) }), w.commit, 'camp-1'), 'roster_mismatch');
+  // ...or in the roster it serves, which it cannot re-sign
+  const forged = structuredClone(w.signed); forged.roster.seats[1].boxPublicKey = evil.boxPublicKey;
+  refuses(() => authenticate(w.raw({ roster: forged, trustees: w.listed().map((x) => (x.index === 2 ? { ...x, boxPublicKey: evil.boxPublicKey } : x)) }), w.commit, 'camp-1'), 'roster_invalid');
+  // a roster signed by the server's own key, or by a trustee who is not the founder
+  for (const impostor of [evil, w.ts[1].keys]) {
+    const r = structuredClone(w.roster); r.seats[1].boxPublicKey = evil.boxPublicKey;
+    refuses(() => authenticate(w.raw({ roster: { roster: r, signature: C.signRoster(impostor.signSecretKey, r) } }), w.commit, 'camp-1'), 'roster_invalid');
+  }
+  // a genuine roster for a different campaign, replayed
+  refuses(() => authenticate(w.raw(), w.commit, 'camp-2'), 'roster_invalid');
+  // a lower threshold, or a different size, than the founder signed
+  refuses(() => authenticate(w.raw({ k: 2, roster: { roster: { ...w.roster, k: 3 }, signature: w.signed.signature } }), w.commit, 'camp-1'), 'roster_invalid');
+  refuses(() => authenticate(w.raw({ n: 4 }), w.commit, 'camp-1'), 'roster_mismatch');
+  refuses(() => authenticate(w.raw({ k: 3 }), w.commit, 'camp-1'), 'roster_mismatch');
+  // the founder's key check still has to match, so a whole invented committee signed by an invented founder fails too
+  const fake = rosterWorld(3, 2);
+  refuses(() => authenticate({ ...fake.raw(), campaignId: 'camp-1' }, w.commit, 'camp-1'), 'founder_mismatch');
+  // a validly signed roster whose seat 1 is not the founder's key is refused
+  const odd = structuredClone(w.roster); odd.seats[0].boxPublicKey = evil.boxPublicKey;
+  refuses(() => authenticate(w.raw({ roster: { roster: odd, signature: C.signRoster(w.ts[0].keys.signSecretKey, odd) } }), w.commit, 'camp-1'), 'roster_invalid');
+  // withholding the roster cannot make a browser use the server's list: it falls back to the founder alone
+  const withheld = authenticate(w.raw({ roster: null }), w.commit, 'camp-1');
+  assert.deepEqual([withheld.mode, withheld.seats.length], ['solo', 1]);
+});
+
+test('the founder signs only a roster built from their own key and the committee they checked', () => {
+  const w = rosterWorld(), F = w.ts[0].keys, evil = C.newKeypairs();
+  const built = rosterToSign(w.raw({ roster: null }), 'camp-1', F);
+  assert.ok(C.verifyRoster(F.signPublicKey, C.signRoster(F.signSecretKey, built), built));
+  assert.deepEqual(built.seats.map((s) => s.boxPublicKey), w.ts.map((t) => t.keys.boxPublicKey));
+  refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed(2) }), 'camp-1', F), 'committee_incomplete'); // someone has not joined
+  // the server puts a different key in the founder's own seat (which the founder did not check against anyone)
+  for (const swap of [{ boxPublicKey: evil.boxPublicKey }, { signPublicKey: evil.signPublicKey }]) {
+    refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x, i) => (i === 0 ? { ...x, ...swap } : x)) }), 'camp-1', F), 'own_seat_mismatch');
+  }
+  refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x) => (x.index === 3 ? { ...x, boxPublicKey: 'short' } : x)) }), 'camp-1', F), 'committee_incomplete');
+});
+
+test('a trustee can check that the roster the founder signed contains their own key', () => {
+  const w = rosterWorld();
+  assert.equal(checkMySeat(w.raw({ roster: null }), w.commit, 'camp-1', 2, w.ts[1].keys.boxPublicKey), 'unsigned');
+  assert.equal(checkMySeat(w.raw(), undefined, 'camp-1', 2, w.ts[1].keys.boxPublicKey), 'unknown'); // an older key file with no key check to verify against
+  assert.equal(checkMySeat(w.raw(), w.commit, 'camp-1', 2, w.ts[1].keys.boxPublicKey), 'ok');
+  refuses(() => checkMySeat(w.raw(), w.commit, 'camp-1', 2, C.newKeypairs().boxPublicKey), 'my_key_missing'); // the roster names a key that is not mine
+  // a founder who signed a different key for seat 2 is caught by trustee 2
+  const swapped = structuredClone(w.roster); swapped.seats[1].boxPublicKey = C.newKeypairs().boxPublicKey;
+  const raw = w.raw({ roster: { roster: swapped, signature: C.signRoster(w.ts[0].keys.signSecretKey, swapped) }, trustees: w.listed().map((x) => (x.index === 2 ? { ...x, boxPublicKey: swapped.seats[1].boxPublicKey } : x)) });
+  refuses(() => checkMySeat(raw, w.commit, 'camp-1', 2, w.ts[1].keys.boxPublicKey), 'my_key_missing');
+  refuses(() => checkMySeat(w.raw(), w.commit, 'camp-2', 2, w.ts[1].keys.boxPublicKey), 'roster_invalid');
+});
+
+test('frontend trust: everything sealed for the trustees goes through the roster check, and invitation links carry the founder\'s key check', () => {
+  const dir = path.resolve(import.meta.dirname, '../web/src');
+  const seals = /\b(encryptCard|encryptCardSolo|sealForTrustees|reshareCard)\(/;
+  for (const f of readdirSync(dir)) {
+    const src = readFileSync(path.join(dir, f), 'utf8');
+    if (seals.test(src)) {
+      // a file that seals for the trustees must authenticate the keys first (shared/roster.js), and never seal straight to the server's list
+      assert.ok(/\b(authenticate|rosterToSign)\(/.test(src), `${f} seals for the trustees without authenticating their keys`);
+      for (const line of src.split('\n')) if (seals.test(line)) assert.ok(!/raw\.trustees|meta\.trustees|\.trustees\.map/.test(line), `${f} seals straight to the server's list of keys: ${line.trim().slice(0, 90)}`);
+    }
+    // signing invitations, and invitations for a trustee seat, carry the founder's key check (the founder's own first link cannot: their keys do not exist yet)
+    for (const m of src.matchAll(/linkTo\('\/(j|t)',\s*\{([^}]*)\}/g)) {
+      const firstFounderLink = m[1] === 't' && /\be: tok\b/.test(m[2]);
+      assert.ok(firstFounderLink || /\bf:/.test(m[2]), `${f}: an invitation link is built without the founder's key check: ${m[0].slice(0, 90)}`);
+    }
+  }
 });

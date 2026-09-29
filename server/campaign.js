@@ -2,7 +2,7 @@
 // tokens, public keys and counts. It never receives a key that opens a card or the campaign metadata.
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { fail } from './http.js';
-import { hashToken, vouchHash, verifyAuth } from '../shared/crypto.js';
+import { hashToken, vouchHash, verifyAuth, verifyRoster, canonicalJson } from '../shared/crypto.js';
 import { issueChallenge, takeChallenge, bearer, sigHeader } from './auth.js';
 import { confirmationEmail } from './mail.js';
 import { makeLimiter } from './rate.js';
@@ -85,12 +85,14 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const who = authorizeMeta(ctx, id); // authenticate first so unknown ids and bad tokens look identical
     const c = db.prepare('SELECT * FROM campaigns WHERE id=?').get(id);
     if (!c) fail(404, 'not_found');
-    const trustees = db.prepare('SELECT trustee_index i, box_public_key pk, enrolled_at e FROM trustees WHERE campaign_id=? ORDER BY trustee_index').all(id);
+    const trustees = db.prepare('SELECT trustee_index i, box_public_key pk, sign_public_key sk, enrolled_at e FROM trustees WHERE campaign_id=? ORDER BY trustee_index').all(id);
     const idleDays = Math.floor((Date.now() - Date.parse(c.last_activity_at)) / 86400_000);
     return {
       id, status: c.status, k: c.threshold_k, n: c.trustee_count_n, metaCiphertext: c.meta_ciphertext, metaNonce: c.meta_nonce,
       templateVersion: c.card_template_version, releaseMin: c.release_min, createdAt: c.created_at,
-      trustees: trustees.map((t) => ({ index: t.i, enrolled: !!t.e, boxPublicKey: t.pk })),
+      // Browsers do not take these on trust: they check the founder's keys against the invitation link and the roster against the founder's signature (shared/roster.js).
+      trustees: trustees.map((t) => ({ index: t.i, enrolled: !!t.e, boxPublicKey: t.pk, signPublicKey: t.sk })),
+      roster: c.roster_json ? { roster: JSON.parse(c.roster_json), signature: c.roster_sig } : null,
       inactivityDaysLeft: Math.max(0, cfg.inactivityDays - idleDays), inactivityWarn: idleDays >= cfg.inactivityDays - 30,
       ...(who.enrollIndex ? { yourTrusteeIndex: who.enrollIndex } : {}),
     };
@@ -171,16 +173,17 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     if (!isUuid(b.cardId) || !isTok(b.inviteToken) || !isB64(b.ciphertext, 16, 30000) || !isB64(b.nonce, 32, 32)
       || !isTok(b.memberTokenHash) || !isTok(b.disavowTokenHash) || !TEMPLATE.test(b.templateVersion) || !Array.isArray(b.sealedShares)) fail(400, 'bad_request');
     return db.transaction(() => {
-      const inv = db.prepare(`SELECT i.*, c.status cstatus, c.trustee_count_n n, c.card_template_version tv
+      const inv = db.prepare(`SELECT i.*, c.status cstatus, c.trustee_count_n n, c.card_template_version tv, c.roster_json rj
         FROM invites i JOIN campaigns c ON c.id=i.campaign_id WHERE i.token_hash=?`).get(hashToken(b.inviteToken));
       if (!inv || inv.revoked_at || inv.expires_at <= now() || inv.use_count >= inv.max_uses) fail(404, 'invalid_invite');
       if (inv.cstatus !== 'active') fail(409, 'campaign_not_active');
       if (b.templateVersion !== inv.tv && !b.templateVersion.startsWith(inv.tv + '-')) fail(400, 'bad_template');
-      // Until every trustee has joined, a card is sealed to the founder alone ('solo'); after that it is split k-of-n.
-      // If the committee changed while the signer was typing, they get 409 and their browser seals it again.
+      // A card is sealed to the founder alone ('solo') until the founder has signed the roster of the whole committee, and split k-of-n after that.
+      // (Every trustee having joined is not enough: a browser can only trust keys the founder vouched for.) If that changed while the signer was typing,
+      // they get 409 and their browser seals it again.
       const enrolled = db.prepare('SELECT trustee_index i FROM trustees WHERE campaign_id=? AND enrolled_at IS NOT NULL').all(inv.campaign_id).map((r) => r.i);
       const solo = b.sealMode === 'solo';
-      if (solo === (enrolled.length === inv.n)) fail(409, 'committee_changed');
+      if (solo === !!inv.rj) fail(409, 'committee_changed');
       const idx = b.sealedShares.map((s) => s?.trusteeIndex);
       if (solo) {
         if (b.sealedShares.length !== 1 || idx[0] !== 1 || !enrolled.includes(1) || !isB64(b.sealedShares[0].sealed, 60, 300)) fail(400, 'bad_shares');
@@ -335,7 +338,9 @@ export function campaignRoutes({ router, db, cfg, mail }) {
   R('POST', '/api/reports', { strict: true, maxBody: 200_000 }, (ctx) => {
     const card = cardByToken(ctx);
     const b = ctx.body;
-    const joined = db.prepare('SELECT trustee_index i FROM trustees WHERE campaign_id=? AND enrolled_at IS NOT NULL').all(card.campaign_id).map((r) => r.i);
+    // A browser can only seal to keys it can authenticate: the founder's (from the invitation link), and the whole committee once the founder has signed the roster.
+    const cmp = db.prepare('SELECT trustee_count_n n, roster_json rj FROM campaigns WHERE id=?').get(card.campaign_id);
+    const joined = cmp.rj ? Array.from({ length: cmp.n }, (_, i) => i + 1) : [1];
     if (!isUuid(b.id) || !isB64(b.ciphertext, 16, 30000) || !isB64(b.nonce, 32, 32) || !Array.isArray(b.sealedKeys) || b.sealedKeys.length !== joined.length
       || !b.sealedKeys.every((s) => Number.isInteger(s?.trusteeIndex) && joined.includes(s.trusteeIndex) && isB64(s.sealed, 60, 300)) || new Set(b.sealedKeys.map((s) => s.trusteeIndex)).size !== joined.length) fail(409, 'committee_changed');
     try {
@@ -413,6 +418,33 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     return { ok: true };
   });
 
+  // The founder signs the committee once every trustee has joined and they have checked each one's key words with them (docs/PROTOCOL.md 1a).
+  // The server stores it and flips new cards to k-of-n, but it cannot forge one: browsers verify the founder's signature themselves. Checking it here too
+  // only keeps a mistaken or corrupted roster out.
+  R('POST', '/api/campaigns/:id/roster', { strict: true }, (ctx) => {
+    const id = ctx.params.id;
+    if (authTrustee(ctx, 'POST /api/campaigns/:id/roster', id) !== 1) fail(403, 'founder_only');
+    const signature = ctx.body.signature;
+    if (!ctx.body.roster || typeof signature !== 'string' || signature.length > 200) fail(400, 'bad_request');
+    return db.transaction(() => {
+      const c = db.prepare('SELECT trustee_count_n n, threshold_k k, roster_json rj FROM campaigns WHERE id=?').get(id);
+      if (!c) fail(404, 'not_found');
+      const ts = db.prepare('SELECT trustee_index i, box_public_key pk, sign_public_key sk, enrolled_at e FROM trustees WHERE campaign_id=? ORDER BY trustee_index').all(id);
+      if (ts.length !== c.n || ts.some((t) => !t.e)) fail(409, 'committee_incomplete');
+      const held = { campaignId: id, k: c.k, n: c.n, seats: ts.map((t) => ({ index: t.i, boxPublicKey: t.pk })) };
+      const sent = ctx.body.roster;
+      if (canonicalJson({ campaignId: sent.campaignId, k: sent.k, n: sent.n, seats: Array.isArray(sent.seats) ? sent.seats.map((s) => ({ index: s?.index, boxPublicKey: s?.boxPublicKey })) : null }) !== canonicalJson(held)) fail(400, 'roster_mismatch');
+      if (!verifyRoster(ts[0].sk, signature, held)) fail(400, 'bad_signature');
+      if (c.rj) { // already signed: the same roster again is fine (a retry), a different one is not
+        if (c.rj === JSON.stringify(held)) return { confirmed: true, already: true };
+        fail(409, 'roster_exists');
+      }
+      db.prepare('UPDATE campaigns SET roster_json=?, roster_sig=? WHERE id=?').run(JSON.stringify(held), signature, id);
+      touch(id);
+      return { confirmed: true };
+    })();
+  });
+
   // Cards still sealed to the founder alone, so the founder can re-lock them to the whole committee.
   R('GET', '/api/campaigns/:id/reshare-bundle', {}, (ctx) => {
     const id = ctx.params.id;
@@ -426,9 +458,9 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const cards = ctx.body.cards;
     if (!Array.isArray(cards) || cards.length < 1 || cards.length > 500) fail(400, 'bad_request');
     return db.transaction(() => {
-      const c = db.prepare('SELECT trustee_count_n n FROM campaigns WHERE id=?').get(id);
+      const c = db.prepare('SELECT trustee_count_n n, roster_json rj FROM campaigns WHERE id=?').get(id);
       if (!c) fail(404, 'not_found');
-      if (enrolledCount(id) !== c.n) fail(409, 'committee_incomplete');
+      if (!c.rj) fail(409, 'roster_not_confirmed'); // the founder signs the roster first; that is what makes new cards k-of-n, so the set of solo cards stops growing
       for (const item of cards) {
         const idx = Array.isArray(item?.sealedShares) ? item.sealedShares.map((s) => s?.trusteeIndex) : [];
         if (!isUuid(item?.cardId) || !Array.isArray(item.sealedShares) || item.sealedShares.length !== c.n || !item.sealedShares.every((s) => Number.isInteger(s?.trusteeIndex) && isB64(s.sealed, 60, 300))
