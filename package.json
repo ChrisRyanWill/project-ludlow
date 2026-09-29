@@ -19,7 +19,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "libsodium-wrappers-sumo": "^0.8.4",
     "pdf-lib": "^1.17.1",
     "qrcode-generator": "^2.0.4",
