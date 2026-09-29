@@ -21,6 +21,8 @@ export function openDb(file) {
   const roleCols = db.prepare("SELECT name FROM pragma_table_info('ws_roles')").all().map((c) => c.name);
   if (!roleCols.includes('removed_by_vote_id')) db.exec('ALTER TABLE ws_roles ADD COLUMN removed_by_vote_id TEXT');
   if (!campCols.includes('release_min')) db.exec('ALTER TABLE campaigns ADD COLUMN release_min INTEGER NOT NULL DEFAULT 1');
+  if (!campCols.includes('roster_json')) db.exec('ALTER TABLE campaigns ADD COLUMN roster_json TEXT');
+  if (!campCols.includes('roster_sig')) db.exec('ALTER TABLE campaigns ADD COLUMN roster_sig TEXT');
   if (!cardCols.includes('seal_mode')) db.exec("ALTER TABLE cards ADD COLUMN seal_mode TEXT NOT NULL DEFAULT 'shamir'");
   // A campaign is live as soon as its founder (trustee 1) has a key; it used to wait for every trustee.
   db.exec(`UPDATE campaigns SET status='active' WHERE status='draft' AND EXISTS
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   threshold_k INTEGER NOT NULL, trustee_count_n INTEGER NOT NULL,
   meta_ciphertext TEXT NOT NULL, meta_nonce TEXT NOT NULL, card_template_version TEXT NOT NULL,
   release_min INTEGER NOT NULL DEFAULT 1, -- the server will not hand over the sealed cards until this many are signed and vouched
+  roster_json TEXT, roster_sig TEXT, -- the committee as the founder signed it (docs/PROTOCOL.md 1a). Until it exists, cards are sealed to the founder alone
   created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
   CHECK (threshold_k >= 2 AND threshold_k <= trustee_count_n AND trustee_count_n <= 7)
 );

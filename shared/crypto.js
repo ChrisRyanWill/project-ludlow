@@ -228,6 +228,33 @@ export function verifyTally(signPublicKey, sig, voteId, counts) {
   try { return sodium.crypto_sign_verify_detached(unb64(sig), tallyMsg(voteId, counts), unb64(signPublicKey)); } catch { return false; }
 }
 
+// ---------- who a browser may seal to: the founder's key check and the signed roster ----------
+// Browsers seal to public keys the server hands them, so a server could hand out keys of its own and read whatever is sealed to them. Two things stop that:
+//  1. every invitation link (whose "#" part the server never sees) carries founderCommit(): a short hash of the founder's public keys; and
+//  2. once every trustee has joined, the founder signs the roster: who the trustees are, how many there are and how many must be together.
+// A browser seals only to keys that match the link's check (the founder alone) or that the founder signed (the whole committee).
+export const founderCommit = (boxPublicKey, signPublicKey) => b64(sodium.crypto_hash_sha256(utf8(`ludlow founder v1|${boxPublicKey}|${signPublicKey}`)).subarray(0, 16));
+
+const KEY43 = /^[A-Za-z0-9_-]{43}$/;
+// A roster is exactly {campaignId, k, n, seats: [{index: 1..n in order, boxPublicKey}]}, with distinct keys and 2 <= k <= n.
+export function rosterShapeOk(r) {
+  if (!r || typeof r !== 'object' || typeof r.campaignId !== 'string' || !Number.isInteger(r.k) || !Number.isInteger(r.n) || r.k < 2 || r.k > r.n || r.n > 32) return false;
+  if (!Array.isArray(r.seats) || r.seats.length !== r.n) return false;
+  const seen = new Set();
+  for (let i = 0; i < r.n; i++) {
+    const seat = r.seats[i];
+    if (!seat || seat.index !== i + 1 || typeof seat.boxPublicKey !== 'string' || !KEY43.test(seat.boxPublicKey) || seen.has(seat.boxPublicKey)) return false;
+    seen.add(seat.boxPublicKey);
+  }
+  return true;
+}
+// Only the whitelisted fields are signed, in canonical form, under a domain of their own: nothing else the founder signs (a sign-in, a tally) can be a roster.
+const rosterMsg = (r) => utf8('ludlow roster v1|' + canonicalJson({ campaignId: r.campaignId, k: r.k, n: r.n, seats: r.seats.map((s) => ({ index: s.index, boxPublicKey: s.boxPublicKey })) }));
+export const signRoster = (signSecretKey, roster) => b64(sodium.crypto_sign_detached(rosterMsg(roster), unb64(signSecretKey)));
+export function verifyRoster(signPublicKey, sig, roster) {
+  try { return rosterShapeOk(roster) && sodium.crypto_sign_verify_detached(unb64(sig), rosterMsg(roster), unb64(signPublicKey)); } catch { return false; }
+}
+
 // ---------- secret ballots ----------
 // The vote's private key is split k-of-n among the election committee and never stored whole.
 export async function newVoteKeys(committee, k) {

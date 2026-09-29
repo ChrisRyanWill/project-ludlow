@@ -51,5 +51,17 @@ const FRIENDLY = {
   committee_changed: 'The committee just changed. Please try again.',
   founder_only: 'Only the founder (trustee 1) can do that.',
   bad_key: 'This link is missing part of its key. Ask for it to be sent again and copy the whole link.',
+  // The keys the website gave this device did not check out. Nothing is signed, sealed or sent.
+  no_commit: "This invitation is from an older version, so it cannot check the trustees' keys. Ask whoever invited you for a new link.",
+  no_founder: 'The founder has not set up their key yet. Please try again later.',
+  founder_mismatch: 'The keys this website gave your phone do not match your invitation, so nothing was signed or sent. The website may have been tampered with, or the link may have been changed. Tell whoever invited you, in person or by phone, and do not try again from this link.',
+  roster_invalid: 'The committee this website showed is not the one the founder signed, so nothing was signed or sent. The website may have been tampered with. Tell whoever invited you, in person or by phone.',
+  roster_mismatch: 'The committee this website lists does not match the roster that was signed, so nothing was signed or sent. If you were invited to sign a card, the website may have been tampered with: tell whoever invited you, in person or by phone. If you are trustee 1, look again and check your key words.',
+  committee_incomplete: 'Not every trustee has joined yet.',
+  own_seat_mismatch: 'The website put a key in your own seat that is not yours. Do not confirm the committee: something is wrong. Tell the other trustees.',
+  my_key_missing: 'The committee the founder signed does not contain your key. Talk to trustee 1 before you trust this campaign.',
+  roster_not_confirmed: 'The founder has not confirmed the committee yet.',
+  roster_exists: 'The committee has already been confirmed.',
+  bad_signature: 'That confirmation could not be checked. Please try again.',
 };
 export const friendly = (e) => FRIENDLY[e?.code] || 'Something went wrong. Please try again.';

@@ -1,8 +1,9 @@
 // The organizing side: start a campaign, enroll trustees, sign a card, follow progress, keep a private record.
 // Every secret is created in this browser; the server is only ever given ciphertext and hashes.
 import * as C from '../../shared/crypto.js';
+import { authenticate, RosterError, isCommit } from '../../shared/roster.js';
 import qrcode from 'qrcode-generator';
-import { api, bearer, ApiError } from './api.js';
+import { api, bearer, ApiError, friendly } from './api.js';
 import { store } from './store.js';
 import { t, getLang, LANGS } from './i18n.js';
 import { PACKS, packOf, markersFor } from './packs.js';
@@ -193,9 +194,7 @@ function doneView({ meta, links }) {
     h1(t('Your campaign is ready')),
     p({ class: 'lead' }, t('Next, make your key. As soon as you have, you can invite coworkers to sign. You do not have to wait for anyone else.')),
     div({ class: 'card' }, h3(t('Trustee 1: {name} (you)', { name: meta.trusteeNames[0].displayName })), p(t('Your key file is the only way to open the cards until other trustees join. Guard it.')), linkBtn(t('Set up my key'), links[0].replace(location.origin, ''), 'primary')),
-    meta.trusteeNames.length > 1 ? details({ class: 'card' }, summary(t('Invitation links for your other trustees (optional for now)')),
-      callout('warn', strong(t('These links are keys.')), ' ', t('Each one lets a trustee read the campaign name and set up their key. Send each only to that person, privately. You can also make fresh links later from your dashboard.')),
-      meta.trusteeNames.slice(1).map((tn, i) => div({ class: 'card inner' }, h3(t('Trustee {n}: {name}', { n: tn.index, name: tn.displayName })), trusteeInvite(links[i + 1], tn.displayName, meta)))) : null);
+    meta.trusteeNames.length > 1 ? p({ class: 'small muted' }, t('Once your key is set up, invite your other trustees from your dashboard. Their invitations carry a check of your key, so that everyone who signs can make sure they are sealing to the real committee.')) : null);
 }
 export function trusteeInvite(link, name, meta) {
   const msg = t('Hi {name}, I would like you to be a trustee for our union campaign at {employer}. Open this link on your personal phone and follow the steps: ', { name, employer: meta.employerName });
@@ -207,7 +206,7 @@ export function trusteeInvite(link, name, meta) {
 export async function EnrollPage() {
   setTitle('Become a trustee', true);
   await C.ready;
-  const f = fragment(), e = f.get('e'), k = f.get('k'), c = f.get('c');
+  const f = fragment(), e = f.get('e'), k = f.get('k'), c = f.get('c'), founderLink = f.get('f');
   if (!e || !k || !c) return shell(div({ class: 'wrap' }, callout('danger', t('This link is incomplete. Ask for it to be sent again, and make sure the whole link is copied.'))));
   scrubFragment(); // the secrets are in memory now; don't leave them in the address bar and the browser's history
   let raw, meta;
@@ -225,9 +224,9 @@ export async function EnrollPage() {
         div({ class: 'keycheck' }, strong(t('Your key words')),
           p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the cards are locked to the committee, so nobody can slip in a different key.')),
           div({ class: 'keywords', lang: 'en' }, C.keyWords(S.made.pub.boxPublicKey))),
-        done ? p(t('Your committee is complete. From now on any {k} of the {n} trustees together can open the cards.', { k: raw.k, n: raw.n }))
+        done ? p(t('Everyone has joined. Trustee 1 now checks each trustee\'s key words with them and confirms the committee. After that, any {k} of the {n} trustees together can open the cards.', { k: raw.k, n: raw.n }))
           : idx === 1 ? callout('warn', strong(t('You can start inviting coworkers now.')), ' ', t('Until at least one more trustee joins, only you can open the cards. Add trustees from your dashboard when they are ready.'))
-            : p(t('Thank you. The founder will lock the existing cards to the committee once everyone has joined.')),
+            : p(t('Thank you. Trustee 1 will confirm the committee, and lock the early cards to it, once everyone has joined.')),
         linkBtn(t('Go to my trustee dashboard'), '/t/dashboard', 'primary'));
     }
     return div(
@@ -235,6 +234,7 @@ export async function EnrollPage() {
       p({ class: 'lead' }, t('You hold one of {n} keys. Any {k} of the trustees together can open the signed cards. Nobody can do it alone, including this website.', { n: raw.n, k: raw.k })),
       p(t('You are trustee {i}{name}.', { i: idx, name: myName ? ` (${myName})` : '' })),
       passphraseNote(),
+      idx !== 1 && !isCommit(founderLink) ? callout('warn', t('This invitation is from an older version and has no check of the founder\'s key, so this device will not be able to verify the committee. You can still be a trustee.')) : null,
       idx === 1 && raw.n > 1 ? callout('warn', strong(t('You are the founder.')), ' ', t('Until the other trustees join, this key file is the only way to open the cards. Back it up somewhere safe as well.')) : null,
       div({ class: 'card' }, h2(t('1. Choose a passphrase')),
         S.own
@@ -247,7 +247,7 @@ export async function EnrollPage() {
           if (!S.made) {
             await wait(60);
             const keys = C.newKeypairs();
-            const file = C.makeKeyFile({ format: 'trustee-keyfile-v1', header: { campaignId: c, trusteeIndex: idx }, secrets: { ...keys, campaignKey: k }, passphrase: S.pass });
+            const file = C.makeKeyFile({ format: 'trustee-keyfile-v1', header: { campaignId: c, trusteeIndex: idx }, secrets: { ...keys, campaignKey: k, founder: idx === 1 ? C.founderCommit(keys.boxPublicKey, keys.signPublicKey) : (isCommit(founderLink) ? founderLink : null) }, passphrase: S.pass });
             S.made = { file, pub: { boxPublicKey: keys.boxPublicKey, signPublicKey: keys.signPublicKey } };
             store.set(`tk.${c}.${idx}`, file);
           }
@@ -281,16 +281,21 @@ const sameName = (a, b) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.tri
 export async function JoinPage() {
   setTitle('Sign a card', true);
   await C.ready;
-  const f = fragment(), i = f.get('i'), k = f.get('k'), c = f.get('c');
+  const f = fragment(), i = f.get('i'), k = f.get('k'), c = f.get('c'), fc = f.get('f');
   const bad = (msg) => shell(div({ class: 'wrap' }, callout('danger', msg)));
   if (!i || !k || !c) return bad(t('This link is incomplete. Ask for it to be sent again, and make sure the whole link is copied.'));
   scrubFragment(); // the secrets are in memory now; don't leave them in the address bar and the browser's history
   let info, raw, meta;
   try { info = await api('POST', '/api/invites/resolve', { body: { token: i } }); ({ raw, meta } = await loadMeta(c, k, bearer(i))); } catch { return bad(t('This invitation is no longer valid. It may have expired, been used, or been withdrawn. Ask the person who sent it for a new one.')); }
+  // The server told us who the trustees are. Do not take its word: check the founder's keys against this invitation and, once the founder has signed it, the
+  // committee against the roster. A mismatch means the website (or the link) was altered, so nothing is asked of the person and nothing is sealed.
+  let sealTo;
+  try { sealTo = authenticate(raw, fc, c); } catch (err) { if (err instanceof RosterError) return shell(div({ class: 'wrap' }, h1(t('Your card was not signed')), callout('danger', strong(t('Stop.')), ' ', t(friendly(err))))); throw err; }
   const pack = packOf(meta.jurisdiction);
   const langs = Object.keys(pack.cards);
-  const F = { step: 'intro', name: '', email: '', phone: '', job: '', shift: '', lang: getLang() === 'es' ? 'Español' : '', sign: '', consent: false, cardLang: langs.includes(getLang()) ? getLang() : 'en', result: null };
+  const F = { step: 'intro', blocked: null, name: '', email: '', phone: '', job: '', shift: '', lang: getLang() === 'es' ? 'Español' : '', sign: '', consent: false, cardLang: langs.includes(getLang()) ? getLang() : 'en', result: null };
   return shell(div({ class: 'wrap' }, view((update) => {
+    if (F.blocked) return div(h1(t('Your card was not signed')), callout('danger', strong(t('Stop.')), ' ', t(friendly({ code: F.blocked }))));
     const cardText = fill(cardBody(pack.cards[F.cardLang] || pack.cards.en), { employerName: meta.employerName, unionName: meta.unionName });
     if (F.step === 'intro') {
       return div(
@@ -324,17 +329,19 @@ export async function JoinPage() {
           ...(F.job.trim() ? { jobTitle: F.job.trim() } : {}), ...(F.shift.trim() ? { shiftOrDepartment: F.shift.trim() } : {}), ...(F.lang.trim() ? { preferredLanguage: F.lang.trim() } : {}),
         };
         const templateVersion = F.cardLang === 'en' ? 'card-v1' : `card-v1-${F.cardLang}`;
-        // Until every trustee has joined, a card is sealed to the founder alone; once the committee is complete it is split among all of them.
-        const seal = async () => {
-          const joined = raw.trustees.filter((x) => x.enrolled), founder = joined.find((x) => x.index === 1);
-          return joined.length === raw.n
-            ? C.encryptCard({ campaignId: c, templateVersion, payload, trustees: raw.trustees.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey })), k: raw.k })
-            : C.encryptCardSolo({ campaignId: c, templateVersion, payload, founder: { index: 1, boxPublicKey: founder.boxPublicKey } });
-        };
+        // Sealed to the founder alone until the founder has signed the roster of the whole committee, then split k-of-n among the keys the founder signed.
+        const seal = async () => (sealTo.mode === 'shamir'
+          ? C.encryptCard({ campaignId: c, templateVersion, payload, trustees: sealTo.seats, k: sealTo.k })
+          : C.encryptCardSolo({ campaignId: c, templateVersion, payload, founder: sealTo.seats[0] }));
         const vouch = info.kind === 'group' ? C.vouchCode() : null;
         const post = async () => api('POST', '/api/cards', { body: { cardId, inviteToken: i, ...(await seal()), memberTokenHash: C.hashToken(authToken), disavowTokenHash: C.hashToken(disavowToken), vouchCodeHash: vouch ? C.vouchHash(cardId, vouch) : undefined } });
-        try { await post(); } catch (e) { if (e.code !== 'committee_changed') throw e; ({ raw } = await loadMeta(c, k, bearer(i))); await post(); } // the committee changed while they typed: seal it again
-        store.set(`member.${c}`, { secret, campaignKey: k, vouch, cardId });
+        try { await post(); } catch (e) {
+          if (e.code !== 'committee_changed') throw e;
+          ({ raw } = await loadMeta(c, k, bearer(i))); // the committee changed while they typed: check it again, and seal it again
+          try { sealTo = authenticate(raw, fc, c); } catch (err) { if (err instanceof RosterError) { F.blocked = err.code; update(); return; } throw err; }
+          await post();
+        }
+        store.set(`member.${c}`, { secret, campaignKey: k, vouch, cardId, founder: fc }); // the founder's key check stays with the member, for sharing with the committee later
         const sendConfirmation = () => api('POST', `/api/cards/${cardId}/confirm`, { auth: bearer(authToken), body: { to: payload.personalEmail, legalName: payload.legalName, phone: payload.phone, employerName: payload.employerName, unionName: payload.unionName, cardText, disavowToken } });
         let confirmed = false;
         try { await sendConfirmation(); confirmed = true; } catch { /* the done screen offers a retry */ }
@@ -348,6 +355,7 @@ export async function JoinPage() {
         div({ class: 'paper' }, div({ class: 'paper-h' }, meta.unionName), md(cardText), div({ class: 'sig' }, span({ class: 'sig-line' }, F.sign || ' '), small(t('Signature (type your name below)'))), p({ class: 'small muted' }, t('Date: recorded by the server when you sign.'))),
         readAloud(cardText),
         p({ class: 'small' }, span({ class: 'lock' }, '🔒 '), t('Encrypted on your device. This site can\'t read it.'), ' ', a({ href: '/protected', target: '_blank', rel: 'noopener' }, t('How your data is protected'))),
+        details(summary(t('Check who this is sealed to')), p({ class: 'small muted' }, t('Your card is sealed so that only the founder of this campaign (and, once they confirm it, the committee they name) can open it. These words identify the founder\'s key. To be sure, ask the founder to read theirs to you.')), div({ class: 'keywords', lang: 'en' }, C.keyWords(sealTo.founder.boxPublicKey))),
         div({ class: 'card' },
           field(t('Full legal name'), textInput({ value: F.name, autocomplete: 'name', oninput: (e) => (F.name = e.target.value) })),
           field(t('Personal email'), textInput({ type: 'email', value: F.email, autocomplete: 'email', inputmode: 'email', oninput: (e) => (F.email = e.target.value) }), t('Not your work email. We send a confirmation here, as the law requires.')),
@@ -363,7 +371,7 @@ export async function JoinPage() {
         btn(t('Back'), () => { F.step = 'intro'; update(); }, { kind: 'secondary' }));
     }
     const R = F.result;
-    const memberLink = linkTo('/m', { s: R.secret, k, c });
+    const memberLink = linkTo('/m', { s: R.secret, k, c, f: fc });
     return div(
       h1(R.kind === 'group' ? t('Almost done') : t('Your card is signed and counted')),
       R.kind === 'group' ? callout('warn', h3(t('Tell this code, in person, to the coworker who invited you:')), div({ class: 'code' }, R.vouch), p(t('Your card counts once they enter it. Do not send it in a message.'))) : callout('ok', t('Thank you. Your card is counted.')),
@@ -391,7 +399,8 @@ export async function MemberPage() {
   await C.ready;
   const f = fragment();
   let s = f.get('s'), k = f.get('k'), c = f.get('c');
-  if (s && k && c) { store.set(`member.${c}`, { ...(store.get(`member.${c}`) || {}), secret: s, campaignKey: k }); history.replaceState(null, '', '/m'); }
+  const fcLink = f.get('f');
+  if (s && k && c) { store.set(`member.${c}`, { ...(store.get(`member.${c}`) || {}), secret: s, campaignKey: k, ...(isCommit(fcLink) ? { founder: fcLink } : {}) }); history.replaceState(null, '', '/m'); }
   else { const key = store.keys('member.')[0]; if (key) { c = key.slice(7); ({ secret: s, campaignKey: k } = store.get(key)); } }
   if (!s) return shell(div({ class: 'wrap' }, h1(t('No card on this device')), p(t('Open the member link you saved when you signed. If you lost it, ask the person who invited you to send a new invitation.'))));
   const saved = store.get(`member.${c}`) || {};
@@ -403,7 +412,8 @@ export async function MemberPage() {
     if (e.status === 401) { store.del(`member.${c}`); return shell(div({ class: 'wrap' }, h1(t('This card no longer exists')), p(t('It may have been withdrawn or the campaign may have ended. Your data is gone from the server.')))); }
     throw e;
   }
-  const { raw, meta } = await loadMeta(c, k, auth);
+  let raw, meta;
+  ({ raw, meta } = await loadMeta(c, k, auth));
   const pack = packOf(meta.jurisdiction);
   if (me.status === 'pending') {
     return shell(div({ class: 'wrap' },
@@ -428,17 +438,19 @@ export async function MemberPage() {
         btn(t('Create a group link'), act(async () => { S.links.unshift({ kind: 'group', link: await makeInvite('group') }); update(); }), { kind: 'secondary' })),
       S.links.map((l) => inviteBox({ link: l.link, employer: meta.employerName, kind: l.kind }))) : null,
     pend.pending.length ? div({ class: 'card' }, h2(t('People waiting for you to confirm')), p(t('Ask each person for the two-word code they were shown. Only enter it if you met them in person.')), pend.pending.map((q, n) => vouchRow(auth, q, n + 1, update))) : null,
-    lockerSection({ auth, lockerKey, c, raw, meta, pack, k }),
+    lockerSection({ auth, lockerKey, c, raw, meta, pack, k, founder: saved.founder }),
     div({ class: 'card' }, h3(t('Your member link')), p({ class: 'small muted' }, t('Keep it private. It is how you get back here.')),
-      div({ class: 'row' }, btn(t('Copy my link'), () => copy(linkTo('/m', { s, k, c })), { kind: 'secondary small' }),
+      div({ class: 'row' }, btn(t('Copy my link'), () => copy(linkTo('/m', { s, k, c, ...(isCommit(saved.founder) ? { f: saved.founder } : {}) })), { kind: 'secondary small' }),
         // Quick exit only leaves the page. This device keeps your sign-in so you can come back; this removes it (nothing is deleted from the server).
         btn(t('Forget this device'), () => { if (confirm(t('Remove your saved sign-in from this device? To come back you will need the member link you saved. Nothing is deleted from the server.'))) { store.del(`member.${c}`); go('/'); } }, { kind: 'secondary small' }))),
     withdrawBtn(auth, c))))); // a pending member sees only the waiting screen; the rest is for counted members
 
   async function makeInvite(kind) {
     const token = C.newToken();
+    // An invitation carries the founder's key check, which is how the person who signs knows they are sealing to the real committee. Without it we cannot make one.
+    if (!isCommit(saved.founder)) throw new RosterError('no_commit');
     await api('POST', '/api/invites', { auth, body: { campaignId: c, tokenHash: C.hashToken(token), kind } });
-    return linkTo('/j', { i: token, k, c });
+    return linkTo('/j', { i: token, k, c, f: saved.founder });
   }
 }
 function vouchRow(auth, q, n, update) {
@@ -460,7 +472,7 @@ function withdrawBtn(auth, c) {
 }
 
 // ---------- the private record ("retaliation shield") ----------
-function lockerSection({ auth, lockerKey, c, raw, meta, pack, k }) {
+function lockerSection({ auth, lockerKey, c, raw, meta, pack, k, founder }) {
   const box = div({ class: 'card' }, h2(t('My private record')), p({ class: 'muted' }, t('Loading...')));
   const S = { entries: [], adding: false, sharing: null };
   const today = new Date().toISOString().slice(0, 10);
@@ -496,8 +508,17 @@ function lockerSection({ auth, lockerKey, c, raw, meta, pack, k }) {
         field(t('Your name (optional)'), textInput({ oninput: (ev) => (N.name = ev.target.value) })),
         div({ class: 'row' }, btn(t('Share with the committee'), act(async () => {
           const rid = C.uuid();
-          const rep = C.sealForTrustees({ ...e.data, from: N.name.trim() || null, sharedAt: new Date().toISOString() }, raw.trustees.filter((x) => x.enrolled).map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey })), rid);
-          await api('POST', '/api/reports', { auth, body: { id: rid, ...rep } });
+          // Sealed only to keys we can authenticate: the founder's, and the whole committee once the founder has signed the roster.
+          const send = async () => {
+            const sealTo = authenticate(raw, founder, c);
+            const rep = C.sealForTrustees({ ...e.data, from: N.name.trim() || null, sharedAt: new Date().toISOString() }, sealTo.seats, rid);
+            await api('POST', '/api/reports', { auth, body: { id: rid, ...rep } });
+          };
+          try { await send(); } catch (err) {
+            if (err?.code !== 'committee_changed') throw err;
+            ({ raw } = await loadMeta(c, k, auth)); // the committee changed since this page loaded: check it again
+            await send();
+          }
           S.sharing = null; toast(t('Shared with the committee.')); draw();
         }), { kind: 'primary small' }), btn(t('Cancel'), () => { S.sharing = null; draw(); }, { kind: 'secondary small' })));
     };

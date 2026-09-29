@@ -42,7 +42,7 @@ export async function trusteeAuth(h, keys, index, route, campaignId) {
   return `Sig ${json.challengeId}.${index}.${C.signAuth(keys.signSecretKey, { nonce: json.nonce, route, scope: campaignId })}`;
 }
 
-export async function makeCampaign(h, { n = 3, k = 2, meta = {}, releaseMin = 1, enroll = n } = {}) {
+export async function makeCampaign(h, { n = 3, k = 2, meta = {}, releaseMin = 1, enroll = n, confirm = true } = {}) {
   const id = randomUUID(), campaignKey = C.newCampaignKey();
   const enrollTokens = Array.from({ length: n }, () => C.newToken());
   const fullMeta = { unionName: 'Test Workers United', employerName: 'Acme Corp', estimatedUnitSize: 10, unitDescription: 'All staff', trusteeNames: [], ...meta };
@@ -56,7 +56,19 @@ export async function makeCampaign(h, { n = 3, k = 2, meta = {}, releaseMin = 1,
     if (e.status !== 200) throw new Error('enroll failed: ' + JSON.stringify(e.json));
     trustees.push({ index: i + 1, keys });
   }
-  return { id, k, n, campaignKey, trustees, enrollTokens, meta: fullMeta };
+  const camp = { id, k, n, campaignKey, trustees, enrollTokens, meta: fullMeta, confirmed: false };
+  if (enroll === n && confirm) await confirmRoster(h, camp); // a committee that is complete from the start is signed by its founder straight away
+  return camp;
+}
+
+// The founder signs the roster of the whole committee (docs/PROTOCOL.md 1a). Until then cards are sealed to the founder alone, however many trustees have joined.
+export async function confirmRoster(h, camp) {
+  const ts = [...camp.trustees].sort((a, b) => a.index - b.index);
+  const roster = { campaignId: camp.id, k: camp.k, n: camp.n, seats: ts.map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey })) };
+  const signature = C.signRoster(ts[0].keys.signSecretKey, roster);
+  const r = await h.call('POST', `/api/campaigns/${camp.id}/roster`, { auth: await trusteeAuth(h, ts[0].keys, 1, 'POST /api/campaigns/:id/roster', camp.id), body: { roster, signature } });
+  if (r.status === 200) camp.confirmed = true;
+  return { r, roster, signature };
 }
 
 export async function enrollTrustee(h, camp, index, token = camp.enrollTokens[index - 1]) {
@@ -82,7 +94,7 @@ export async function signCard(h, camp, inviteToken, who = {}, { group = false }
     legalName: who.name || 'Pat Signer', personalEmail: who.email || 'pat@example.org', phone: who.phone || '+15555550100', employerName: camp.meta.employerName,
     unionName: camp.meta.unionName, cardText: 'I authorize the union to represent me.', cardTextSha256: 'x', typedSignature: who.name || 'Pat Signer', consentChecked: true, clientSignedAt: new Date().toISOString(), ...who.extra,
   };
-  const enc = camp.trustees.length < camp.n
+  const enc = !camp.confirmed
     ? C.encryptCardSolo({ campaignId: camp.id, templateVersion: 'card-v1', payload, founder: { index: 1, boxPublicKey: camp.trustees[0].keys.boxPublicKey } })
     : await C.encryptCard({ campaignId: camp.id, templateVersion: 'card-v1', payload, trustees: camp.trustees.map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey })), k: camp.k });
   const vouch = group ? C.vouchCode() : null;

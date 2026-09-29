@@ -16,7 +16,7 @@
 
 Project Ludlow is an open-source platform that takes a group of workers from "we should organize" to "we run our own union", in two halves:
 
-1. **Organize.** Coworkers sign electronic authorization cards on their own phones. Each card is encrypted *in the browser* with a key split among a few trusted trustees, so the server only ever holds ciphertext and, once the committee is complete, **no one person can read a card**: it takes `k` of `n` trustees together. (Two honest caveats: until the committee has joined, the founder holds the only key, and a server that lies about which keys belong to the trustees could receive new cards. See the [threat model](docs/THREAT_MODEL.md).) Cards from group links only count once a coworker confirms the signer in person. When the committee decides to go public, the browser builds the filing package locally: roster, cards, declaration, letters, worksheets.
+1. **Organize.** Coworkers sign electronic authorization cards on their own phones. Each card is encrypted *in the browser* with a key split among a few trusted trustees, so the server only ever holds ciphertext and, once the committee is complete, **no one person can read a card**: it takes `k` of `n` trustees together. (Honest caveats: until the founder has confirmed the committee, the founder holds the only key; a signer's browser checks the trustees' keys against the founder's key check in their invitation, so it trusts the founder and whoever gave them the link; and the same protection for the workspace's grievance and vote keys is not built yet. See the [threat model](docs/THREAT_MODEL.md).) Cards from group links only count once a coworker confirms the signer in person. When the committee decides to go public, the browser builds the filing package locally: roster, cards, declaration, letters, worksheets.
 2. **Run.** Once the union is public it gets a workspace with secret-ballot votes, workplace cases, money, rules and deadlines, all built so that **every member can check the work**, not just trust the officers.
 
 > Nothing here files anything, contacts an employer, or talks to an agency. It prepares drafts for people. Every legal text carries `DRAFT — REQUIRES REVIEW BY A LICENSED LABOR ATTORNEY`.
@@ -35,7 +35,7 @@ Data lives in `./data/ludlow.db` (one SQLite file). In development the confirmat
 1. `Start a campaign`, pick the release number (try 3 people), and make your key. **You can invite people right away; nobody else has to join first.**
 2. On your dashboard: `Invite one person`, then `Create a group link`. Sign cards from those links in other windows.
 3. Confirm the group-link signers with their two-word codes. Watch the progress bar, the 30/50/70% markers and the gold lock marker. Try `Unlock and export` before the number is met: it is refused.
-4. In `Your committee`, get an invite link for each other trustee and let them join. Then `Lock the existing cards to the committee`. Now `Unlock and export` with two trustees' key files: the cards open **locally**; download the ZIP.
+4. In `Your committee`, get an invite link for each other trustee and let them join. Ask each one to read you their key words, tick the ones that match, then `Confirm the committee and lock the early cards`. Now `Unlock and export` with two trustees' key files: the cards open **locally**; download the ZIP.
 5. Tick "we have already gone public" to create the workspace. Claim accounts, hold a secret-ballot vote, recount it yourself, then open a case as a worker.
 
 ## What is built (all of it is tested)
@@ -84,7 +84,7 @@ The original build specifications are in [`docs/spec/`](docs/spec/) and double a
 ## Before real-world use
 
 - **Host the server where no trustee controls it**, or the release lock binds nothing (it is enforced by the server; see the threat model).
-- **Read the [threat model](docs/THREAT_MODEL.md) first.** An [internal, AI-assisted security review](docs/reviews/2026-09-internal-review-1.md) found and fixed real problems and wrote down design-level limits (the biggest: a server that lies about which keys belong to whom). It is not an independent audit.
+- **Read the [threat model](docs/THREAT_MODEL.md) first.** An [internal, AI-assisted security review](docs/reviews/2026-09-internal-review-1.md) found and fixed real problems and wrote down design-level limits (the biggest, a server that lies about which keys belong to whom, is now closed for cards and reports and still open for the workspace's grievance and vote keys). It is not an independent audit.
 - **Have a labor attorney review everything in `content/legal/`.** Every `TODO(lawyer)` / `TODO(accountant)` is a real open question.
 - Get an independent security review of `shared/crypto.js`, `server/`, and the deployment. Read the threat model first.
 - Set `WORKSPACE_MASTER_KEY` and back it up. Set `EMAIL_PROVIDER=postmark` (tracking is disabled in code) and a monitored `CONFIRMATION_REPLY_TO` inbox. Run behind HTTPS with `TRUST_PROXY=1` (the number of reverse proxies in front, 1 for Caddy or nginx), and set `NODE_ENV=production` (`npm start` does not, and without it the master key is written next to the database). Run **one** instance (challenges and rate limits are in memory).

@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
+import * as C from '../shared/crypto.js';
 import { startApp, makeCampaign, makeInvite } from './helpers.js';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -239,6 +241,31 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
     await page.getByText('who else had signed a card').waitFor();
   });
 
+  it('a website that lies about the founder\'s key cannot make a phone seal a card, or a report, to keys of its own (founder-only phase)', async () => {
+    const link = await freshInvite();
+    assert.match(link, /&f=[A-Za-z0-9_-]{22}$/);
+    const before = h.app.db.prepare('SELECT COUNT(*) c FROM cards').get().c, reports = h.app.db.prepare('SELECT COUNT(*) c FROM reports').get().c;
+    await refused(swapTrusteeKey(1, 'box_public_key'), link, /do not match your invitation/); // the encryption key it hands out
+    await refused(swapTrusteeKey(1, 'sign_public_key'), link, /do not match your invitation/); // the signing key that will vouch for the committee later
+    // a report from a member's own phone, sealed for the committee, is refused the same way
+    const alice = pages['alice-phone'];
+    const undo = swapTrusteeKey(1, 'box_public_key')();
+    try {
+      await alice.goto('/m');
+      await alice.getByRole('heading', { name: 'My private record' }).waitFor();
+      await btn(alice, 'Add something that happened').click();
+      await alice.getByLabel('What was said or done?').fill('Second incident: they moved my shifts after the meeting.');
+      await btn(alice, 'Save privately').click();
+      const entry = alice.locator('.entry', { hasText: 'Second incident' });
+      await entry.getByRole('button', { name: 'Share with the committee' }).click();
+      await entry.getByRole('button', { name: 'Share with the committee' }).last().click();
+      await alice.getByText(/do not match your invitation/).waitFor();
+      assert.equal(h.app.db.prepare('SELECT COUNT(*) c FROM reports').get().c, reports); // nothing was shared
+    } finally { undo(); }
+    assert.equal(h.app.db.prepare('SELECT COUNT(*) c FROM cards').get().c, before); // and no card was made
+    assert.deepEqual(h.app.db.prepare('SELECT DISTINCT seal_mode m FROM cards').all().map((r) => r.m), ['solo']);
+  });
+
   it('the other trustees join later, and the founder locks the early cards to the committee', async () => {
     const page = pages.trustees;
     await unlockDashboard(page, 1);
@@ -249,7 +276,7 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
       await btn(page, 'Get invite link').first().click();
       await page.locator('.invite-box .link-box').first().waitFor();
       const link = (await page.locator('.invite-box .link-box').first().innerText()).trim();
-      assert.match(link, /\/t#e=.+&k=.+&c=.+/);
+      assert.match(link, /\/t#e=.+&k=.+&c=.+&f=[A-Za-z0-9_-]{22}$/); // the invitation carries a check of the founder's key
       await enroll(page, link, idx);
       if (idx === 2) { // a trustee who is not the founder cannot hand out the seat that is still empty
         await unlockDashboard(page, 2);
@@ -259,17 +286,72 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
       }
       await unlockDashboard(page, 1);
     }
-    await page.getByText(/Everyone has joined. Now lock your early cards to the committee/).waitFor();
-    // The lock stays off until the founder has checked each trustee's key words with them. The words on the founder's screen come from the keys
+    await page.getByText(/Everyone has joined. Now confirm the committee/).waitFor();
+    // Confirming stays off until the founder has checked each trustee's key words with them. The words on the founder's screen come from the keys
     // the server holds, so they must equal what each trustee saw on their own screen.
-    assert.equal(await btn(page, /Lock \d+ existing card/).isDisabled(), true);
+    assert.equal(await btn(page, /Confirm the committee and lock \d+ early card/).isDisabled(), true);
     for (const idx of [2, 3]) await page.locator('.keycheck', { hasText: trustee[idx].words }).locator('input[type=checkbox]').check();
     await shot(page, '06c-key-words');
-    assert.equal(await btn(page, /Lock \d+ existing card/).isDisabled(), false);
-    await btn(page, /Lock \d+ existing card/).click();
-    await page.getByText('Done. Any 2 of 3 trustees are now needed to open the cards.').waitFor(); // the re-lock has really finished
+    assert.equal(await btn(page, /Confirm the committee and lock \d+ early card/).isDisabled(), false);
+    assert.equal(h.app.db.prepare('SELECT roster_json j FROM campaigns').get().j, null); // nothing is signed until the founder does it
+    await btn(page, /Confirm the committee and lock \d+ early card/).click();
+    await page.getByText(/Done\. The committee is confirmed and the early cards are locked to it/).waitFor(); // the roster is signed and the re-lock has really finished
     await page.locator('.callout.ok', { hasText: 'Any 2 of 3 trustees together can open the cards.' }).waitFor();
     assert.deepEqual(h.app.db.prepare('SELECT DISTINCT seal_mode m FROM cards').all().map((r) => r.m), ['shamir']);
+    assert.ok(h.app.db.prepare('SELECT roster_json j FROM campaigns').get().j);
+    // another trustee checks the roster against their own invitation: the founder's signature holds, and their own key is in it
+    await unlockDashboard(page, 2);
+    await page.getByText('Your key is in the roster the founder signed.').waitFor();
+    assert.deepEqual(problems, []);
+  });
+
+  // A website that has been altered to hand out keys of its own: the invitation must be refused, before anything is asked of the person and before
+  // anything is sent. The server here is the real one with its rows changed, and the browser is the real, unmodified app.
+  const evilKey = () => randomBytes(32).toString('base64url');
+  const campaignId = () => h.app.db.prepare('SELECT id FROM campaigns').get().id;
+  const swapTrusteeKey = (index, col) => () => {
+    const args = [campaignId(), index];
+    const was = h.app.db.prepare(`SELECT ${col} v FROM trustees WHERE campaign_id=? AND trustee_index=?`).get(...args).v;
+    h.app.db.prepare(`UPDATE trustees SET ${col}=? WHERE campaign_id=? AND trustee_index=?`).run(evilKey(), ...args);
+    return () => h.app.db.prepare(`UPDATE trustees SET ${col}=? WHERE campaign_id=? AND trustee_index=?`).run(was, ...args);
+  };
+  async function freshInvite() {
+    const page = pages.trustees;
+    await unlockDashboard(page, 1);
+    await btn(page, 'Invite one person').click();
+    await page.locator('.invite-box .link-box').first().waitFor();
+    return (await page.locator('.invite-box .link-box').first().innerText()).trim(); // the newest link is listed first
+  }
+  async function refused(edit, link, expected) {
+    const name = 'signer-' + randomBytes(3).toString('hex');
+    const page = await newPage(name);
+    const sent = [];
+    page.on('request', (r) => { if (r.method() === 'POST' && /\/api\/(cards|reports)/.test(r.url())) sent.push(r.url()); });
+    const undo = edit();
+    try {
+      await page.goto(link);
+      await page.getByRole('heading', { name: 'Your card was not signed' }).waitFor();
+      await page.getByText(expected).waitFor();
+      assert.equal(await page.getByLabel('Full legal name').count(), 0); // no form was even shown
+      assert.deepEqual(sent, []); // and nothing was sent
+    } finally { undo(); await page.context().close(); delete pages[name]; }
+  }
+
+  it('a website that lies about the committee cannot make a phone seal a card to keys the founder did not sign (after the roster is signed)', async () => {
+    const link = await freshInvite();
+    const before = h.app.db.prepare('SELECT COUNT(*) c FROM cards').get().c;
+    await refused(swapTrusteeKey(2, 'box_public_key'), link, /does not match the roster that was signed/); // swaps a trustee's key in its list
+    await refused(swapTrusteeKey(1, 'box_public_key'), link, /do not match your invitation/); // swaps the founder's key
+    // ...and one that also rewrites the signed roster it serves, which it cannot re-sign
+    const editRoster = () => {
+      const was = h.app.db.prepare('SELECT roster_json j FROM campaigns').get().j;
+      const r = JSON.parse(was); r.seats[1].boxPublicKey = evilKey();
+      const undoKey = swapTrusteeKey(2, 'box_public_key')();
+      h.app.db.prepare('UPDATE campaigns SET roster_json=?').run(JSON.stringify(r));
+      return () => { h.app.db.prepare('UPDATE campaigns SET roster_json=?').run(was); undoKey(); };
+    };
+    await refused(editRoster, link, /is not the one the founder signed/);
+    assert.equal(h.app.db.prepare('SELECT COUNT(*) c FROM cards').get().c, before);
     assert.deepEqual(problems, []);
   });
 
@@ -457,12 +539,21 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
   it('the home page and the whole signing flow work in Spanish, with the Spanish card recorded as such', async () => {
     const camp = await makeCampaign(h, { meta: { unionName: 'Sindicato de Prueba', employerName: 'Café Río', jurisdiction: 'us-nlra', estimatedUnitSize: 10 } });
     const inv = await makeInvite(h, camp);
+    const f = C.founderCommit(camp.trustees[0].keys.boxPublicKey, camp.trustees[0].keys.signPublicKey); // the founder's key check, which an invitation link carries
     const page = await newPage('spanish');
     await page.goto('/');
     await page.locator('select.lang').selectOption('es');
     await page.getByRole('heading', { name: 'Forma un sindicato en tu lugar de trabajo, de forma segura.' }).waitFor();
     await btn(page, 'Salida rápida').waitFor();
-    await page.goto(`/j#i=${inv.token}&k=${camp.campaignKey}&c=${camp.id}`);
+    // a website that swaps the founder's key is refused, and the refusal is in Spanish
+    const evil = randomBytes(32).toString('base64url');
+    const real = h.app.db.prepare('SELECT box_public_key k FROM trustees WHERE campaign_id=? AND trustee_index=1').get(camp.id).k;
+    h.app.db.prepare('UPDATE trustees SET box_public_key=? WHERE campaign_id=? AND trustee_index=1').run(evil, camp.id);
+    await page.goto(`/j#i=${inv.token}&k=${camp.campaignKey}&c=${camp.id}&f=${f}`);
+    await page.getByRole('heading', { name: 'Tu tarjeta no se firmó' }).waitFor();
+    await page.getByText(/no coinciden con tu invitación/).waitFor();
+    h.app.db.prepare('UPDATE trustees SET box_public_key=? WHERE campaign_id=? AND trustee_index=1').run(real, camp.id);
+    await page.goto(`/j#i=${inv.token}&k=${camp.campaignKey}&c=${camp.id}&f=${f}`);
     await page.getByRole('heading', { name: 'Antes de firmar' }).waitFor();
     await btn(page, 'Leer la tarjeta').click();
     await page.getByText('Yo, el/la abajo firmante, empleado/a de Café Río, autorizo a Sindicato de Prueba').waitFor();
@@ -474,6 +565,9 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
     await btn(page, 'Firmar la tarjeta').click();
     await page.getByRole('heading', { name: 'Tu tarjeta está firmada y contada' }).waitFor();
     assert.equal(h.app.db.prepare('SELECT template_version v FROM cards WHERE campaign_id=?').get(camp.id).v, 'card-v1-es');
+    const sealed = h.app.db.prepare('SELECT seal_mode m, sealed_shares s FROM cards WHERE campaign_id=?').get(camp.id);
+    assert.equal(sealed.m, 'shamir'); // this campaign's committee was confirmed by its founder, so the card is split among exactly that committee
+    assert.deepEqual(JSON.parse(sealed.s).map((x) => x.trusteeIndex), [1, 2, 3]);
     const mail = h.app.mail.outbox.at(-1);
     assert.ok(mail.text.includes('María Fernández') && mail.text.includes('Yo, el/la abajo firmante')); // the confirmation restates the exact Spanish card
     assert.deepEqual(problems, []);

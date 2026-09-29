@@ -1,6 +1,7 @@
 // The trustee side: dashboard, the unlock-and-export ceremony, and the committee's inbox of reports.
 import * as C from '../../shared/crypto.js';
-import { api, tcall } from './api.js';
+import { api, tcall, friendly } from './api.js';
+import { authenticate, checkMySeat, rosterToSign, RosterError, isCommit } from '../../shared/roster.js';
 import { store } from './store.js';
 import { t } from './i18n.js';
 import { packOf, markersFor } from './packs.js';
@@ -14,7 +15,10 @@ import {
 
 let T = null; // the unlocked trustee: { campaignId, index, keys, campaignKey }
 wipers.push(() => { T = null; });
-const session = (file, s) => ({ campaignId: file.campaignId, index: file.trusteeIndex, keys: s, campaignKey: s.campaignKey });
+// `founder` is the founder's key check that goes into every invitation this trustee makes. The founder's is worked out from their own keys; anyone else's came from their
+// own invitation (an older key file has none, and then cannot make invitations that carry one).
+const session = (file, s) => ({ campaignId: file.campaignId, index: file.trusteeIndex, keys: s, campaignKey: s.campaignKey,
+  founder: file.trusteeIndex === 1 ? C.founderCommit(s.boxPublicKey, s.signPublicKey) : (isCommit(s.founder) ? s.founder : null) });
 const describeKey = (f) => t('Trustee {n} key file (campaign …{id})', { n: f.trusteeIndex, id: f.campaignId.slice(-4) });
 
 async function fingerprint() {
@@ -40,9 +44,10 @@ export async function TrusteeDashboard() {
   const S = { links: [], reports: null, slotLinks: {} };
   const myName = meta.trusteeNames.find((x) => x.index === T.index)?.displayName || '';
   const makeInvite = async (kind) => {
+    if (!T.founder) throw new RosterError('no_commit'); // an invitation must carry the founder's key check, or the person who signs cannot verify the committee
     const token = C.newToken();
     await tcall(T, 'POST /api/invites', { body: { campaignId: T.campaignId, tokenHash: C.hashToken(token), kind } });
-    return linkTo('/j', { i: token, k: T.campaignKey, c: T.campaignId });
+    return linkTo('/j', { i: token, k: T.campaignKey, c: T.campaignId, f: T.founder });
   };
   return shell(div({ class: 'wrap' }, view((update) => div(
     div({ class: 'row between' }, h1(meta.unionName), badge(raw.status === 'active' ? t('Active') : raw.status === 'frozen' ? t('Paused') : t('Setting up'), raw.status === 'active' ? 'ok' : 'warn')),
@@ -87,14 +92,15 @@ export async function TrusteeDashboard() {
   }
 }
 
-// The committee: who has joined, invitations, changing the plan, and locking early cards to the whole committee.
+// The committee: who has joined, invitations, changing the plan, confirming the committee, and locking early cards to it.
 function committeeCard(raw, meta, prog, S, update) {
   const joined = raw.trustees.filter((x) => x.enrolled).length, complete = joined === raw.n, founder = T.index === 1;
+  const confirmed = !!raw.roster;
   const nm = (i) => meta.trusteeNames.find((x) => x.index === i)?.displayName || t('Trustee {n}', { n: i });
   const P = (S.plan ||= { n: raw.n, k: raw.k });
-  // The trustees' public keys come from the server. Before locking cards to them, the founder checks each trustee's key words aloud (the trustee
-  // reads them off their own screen), so a swapped key, or a seat taken by the wrong person, can never receive a share. A key that changes after
-  // the tick no longer counts as checked.
+  // The trustees' public keys come from the server. Before confirming the committee, the founder checks each trustee's key words aloud (the trustee
+  // reads them off their own screen), so a swapped key, or a seat taken by the wrong person, can never be signed for. A key that changes after the
+  // tick no longer counts as checked.
   const words = (x) => C.keyWords(x.boxPublicKey);
   const checked = (x) => S.checked?.[x.index] === words(x);
   const allChecked = raw.trustees.every((x) => !x.enrolled || x.index === T.index || checked(x));
@@ -102,38 +108,70 @@ function committeeCard(raw, meta, prog, S, update) {
     p({ class: 'small muted' }, t('Ask {name} to read you the key words on their own screen.', { name: nm(x.index) })),
     div({ class: 'keywords', lang: 'en' }, words(x)),
     label3(t('These match what {name} read to me', { name: nm(x.index) }), checked(x), (v) => { (S.checked ||= {})[x.index] = v ? words(x) : null; update(); }));
-  const lock = async () => {
-    if (!allChecked) return toast(t('First check each trustee\'s key words with them.'), 'bad');
+
+  // Early cards are locked to the seats the founder SIGNED, never to whatever the server lists now.
+  const relock = async (seats, k) => {
     const { cards } = await tcall(T, 'GET /api/campaigns/:id/reshare-bundle');
-    const trustees = raw.trustees.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey }));
-    if (trustees.length !== raw.n || trustees.some((x) => !x.boxPublicKey)) return toast(t('The committee is not complete yet.'), 'bad');
     const out = [];
-    for (const c of cards) out.push({ cardId: c.id, sealedShares: await C.reshareCard(c.sealedShares.find((s) => s.trusteeIndex === T.index).sealed, T.keys, trustees, raw.k) });
+    for (const c of cards) out.push({ cardId: c.id, sealedShares: await C.reshareCard(c.sealedShares.find((s) => s.trusteeIndex === T.index).sealed, T.keys, seats, k) });
     for (let i = 0; i < out.length; i += 200) await tcall(T, 'POST /api/campaigns/:id/reshare', { body: { cards: out.slice(i, i + 200) } });
-    toast(t('Done. Any {k} of {n} trustees are now needed to open the cards.', { k: raw.k, n: raw.n }));
+  };
+  // The founder signs the roster of the whole committee. From then on every signer's browser can check that it is sealing to the real committee, and new
+  // cards are split k-of-n. Signing comes first, so the set of early cards stops growing before they are locked.
+  const confirm = async () => {
+    if (!allChecked) return toast(t('First check each trustee\'s key words with them.'), 'bad');
+    const roster = rosterToSign(raw, T.campaignId, T.keys); // every seat filled, and the founder's own seat is the founder's own keys
+    await tcall(T, 'POST /api/campaigns/:id/roster', { body: { roster, signature: C.signRoster(T.keys.signSecretKey, roster) } });
+    if (prog.solo) await relock(roster.seats, roster.k);
+    toast(prog.solo ? t('Done. The committee is confirmed and the early cards are locked to it: any {k} of {n} trustees are now needed to open them.', { k: raw.k, n: raw.n }) : t('Done. The committee is confirmed.'));
     render();
   };
+  const lockRest = async () => { // the roster is already signed: lock whatever is still sealed to the founder alone
+    const a = authenticate(raw, T.founder, T.campaignId);
+    if (a.mode !== 'shamir') throw new RosterError('roster_invalid');
+    await relock(a.seats, a.k);
+    toast(t('Done. Any {k} of {n} trustees are now needed to open the cards.', { k: a.k, n: raw.n }));
+    render();
+  };
+
+  // Does the roster on the server check out? The founder checks it against their own key; every other trustee checks the founder's signature and that THEIR key is in it.
+  let status = confirmed ? 'ok' : 'unsigned';
+  if (confirmed) {
+    try { if (founder) authenticate(raw, T.founder, T.campaignId); else status = checkMySeat(raw, T.founder, T.campaignId, T.index, T.keys.boxPublicKey); }
+    catch (e) { if (!(e instanceof RosterError)) throw e; status = { error: e.code }; }
+  }
+  const banner = () => {
+    if (!complete) return callout('warn', strong(t('Only trustee 1 can open the cards right now.')), ' ', t('Invite the other trustees below. When all {n} have joined, trustee 1 confirms the committee so that {k} of them are needed.', { n: raw.n, k: raw.k }));
+    if (!confirmed) {
+      return founder
+        ? callout('warn', strong(t('Everyone has joined. Now confirm the committee.')), ' ', t('Check each trustee\'s key words with them below, then confirm. That is what lets everyone who signs a card check that they are sealing to the real committee.'), prog.solo ? ' ' + t('{n} early card(s) are still sealed to you alone; confirming also locks them to the committee.', { n: prog.solo }) : '')
+        : callout('info', strong(t('Everyone has joined.')), ' ', t('Trustee 1 is checking each trustee\'s key words and will confirm the committee. Until then, cards are sealed to trustee 1 alone.'));
+    }
+    if (status.error) return callout('danger', strong(t('The committee on the server does not check out.')), ' ', t(friendly({ code: status.error })));
+    if (prog.solo) return callout('warn', strong(t('The committee is confirmed.')), ' ', t('{n} early card(s) are still sealed to the founder alone.', { n: prog.solo }));
+    return callout('ok', t('The committee is confirmed: any {k} of {n} trustees together can open the cards.', { k: raw.k, n: raw.n }),
+      founder ? '' : ' ' + (status === 'ok' ? t('Your key is in the roster the founder signed.') : t('(This device holds no key check from its invitation, so it could not verify the roster.)')));
+  };
   return div({ class: 'card' }, h2(t('Your committee')),
-    complete
-      ? (prog.solo ? callout('warn', strong(t('Everyone has joined. Now lock your early cards to the committee.')), ' ', t('{n} card(s) are still sealed to the founder alone.', { n: prog.solo }))
-        : callout('ok', t('Any {k} of {n} trustees together can open the cards.', { k: raw.k, n: raw.n })))
-      : callout('warn', strong(t('Only trustee 1 can open the cards right now.')), ' ', t('Invite the other trustees below. When all {n} have joined, lock the cards to the committee so that {k} of them are needed.', { n: raw.n, k: raw.k })),
+    banner(),
     T.keys?.boxPublicKey ? div({ class: 'keycheck' }, strong(t('Your key words')),
-      p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the cards are locked to the committee, so nobody can slip in a different key.')),
+      p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the committee is confirmed, so nobody can slip in a different key.')),
       div({ class: 'keywords', lang: 'en' }, C.keyWords(T.keys.boxPublicKey))) : null,
     ul(raw.trustees.map((x) => li(strong(nm(x.index)), x.index === T.index ? ' ' + t('(you)') : '', ' ',
-      x.enrolled ? [badge(t('joined'), 'ok'), founder && x.index !== T.index ? keyCheck(x) : null]
+      x.enrolled ? [badge(t('joined'), 'ok'), founder && !confirmed && x.index !== T.index ? keyCheck(x) : null]
         : [badge(t('not joined yet'), 'warn'), ' ', founder ? btn(t('Get invite link'), act(async () => { // only the founder hands out seats
+          if (!T.founder) throw new RosterError('no_commit');
           const token = C.newToken();
           await tcall(T, 'POST /api/campaigns/:id/trustees/reset', { body: { index: x.index, tokenHash: C.hashToken(token) } }); // any older link for this seat stops working
-          S.slotLinks[x.index] = linkTo('/t', { e: token, k: T.campaignKey, c: T.campaignId });
+          S.slotLinks[x.index] = linkTo('/t', { e: token, k: T.campaignKey, c: T.campaignId, f: T.founder }); // the link carries the founder's key check
           update();
         }), { kind: 'secondary small' }) : span({ class: 'small muted' }, t('Trustee 1 sends this invitation.'))],
       S.slotLinks[x.index] ? trusteeInvite(S.slotLinks[x.index], nm(x.index), meta) : null))),
-    complete && prog.solo && founder ? div(
+    complete && !confirmed && founder ? div(
       allChecked ? null : p({ class: 'small muted' }, t('First check each trustee\'s key words with them, above.')),
-      btn(t('Lock {n} existing card(s) to the committee', { n: prog.solo }), act(lock), { kind: 'primary', disabled: !allChecked })) : null,
-    complete && prog.solo && !founder ? p({ class: 'small muted' }, t('Only trustee 1 holds the keys to these cards, so trustee 1 does this step.')) : null,
+      btn(prog.solo ? t('Confirm the committee and lock {n} early card(s)', { n: prog.solo }) : t('Confirm the committee'), act(confirm), { kind: 'primary', disabled: !allChecked })) : null,
+    confirmed && status === 'ok' && prog.solo && founder ? btn(t('Lock {n} early card(s) to the committee', { n: prog.solo }), act(lockRest), { kind: 'primary' }) : null,
+    confirmed && prog.solo && !founder ? p({ class: 'small muted' }, t('Only trustee 1 holds the keys to these cards, so trustee 1 does this step.')) : null,
     !complete && founder ? details(summary(t('Change the plan')),
       p({ class: 'small muted' }, t('You can change how many trustees you plan to have, and how many must be together to open the cards, until everyone has joined.')),
       div({ class: 'row' },
