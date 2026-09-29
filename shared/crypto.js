@@ -205,6 +205,14 @@ export function verifyAuth(signPublicKey, sig, parts) {
   try { return sodium.crypto_sign_verify_detached(unb64(sig), authMsg(parts), unb64(signPublicKey)); } catch { return false; }
 }
 
+// A committee member signs the counts they saw. When the ballot key is not published the server cannot recount, so it requires k different
+// committee members to stand behind the same counts. The message names the vote and the domain, so a signature cannot be reused for anything else.
+const tallyMsg = (voteId, counts) => utf8(`ludlow tally v1|${voteId}|${counts.join(',')}`);
+export const signTally = (signSecretKey, voteId, counts) => b64(sodium.crypto_sign_detached(tallyMsg(voteId, counts), unb64(signSecretKey)));
+export function verifyTally(signPublicKey, sig, voteId, counts) {
+  try { return sodium.crypto_sign_verify_detached(unb64(sig), tallyMsg(voteId, counts), unb64(signPublicKey)); } catch { return false; }
+}
+
 // ---------- secret ballots ----------
 // The vote's private key is split k-of-n among the election committee and never stored whole.
 export async function newVoteKeys(committee, k) {

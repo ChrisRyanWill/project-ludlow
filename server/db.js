@@ -11,10 +11,15 @@ export function openDb(file) {
   const db = new Database(file);
   db.pragma('foreign_keys = ON');
   db.pragma('secure_delete = ON'); // deleted rows (a withdrawn card, a destroyed campaign) are zeroed on disk
+  // Without this, INSERT OR REPLACE deletes the row it replaces WITHOUT firing the delete triggers, which would let anyone with SQL access rewrite
+  // the ledger and the audit log past the "append-only" guards below.
+  db.pragma('recursive_triggers = ON');
   db.exec(SCHEMA);
   // Migrations for databases created by earlier versions.
   const cardCols = db.prepare("SELECT name FROM pragma_table_info('cards')").all().map((c) => c.name);
   const campCols = db.prepare("SELECT name FROM pragma_table_info('campaigns')").all().map((c) => c.name);
+  const roleCols = db.prepare("SELECT name FROM pragma_table_info('ws_roles')").all().map((c) => c.name);
+  if (!roleCols.includes('removed_by_vote_id')) db.exec('ALTER TABLE ws_roles ADD COLUMN removed_by_vote_id TEXT');
   if (!campCols.includes('release_min')) db.exec('ALTER TABLE campaigns ADD COLUMN release_min INTEGER NOT NULL DEFAULT 1');
   if (!cardCols.includes('seal_mode')) db.exec("ALTER TABLE cards ADD COLUMN seal_mode TEXT NOT NULL DEFAULT 'shamir'");
   // A campaign is live as soon as its founder (trustee 1) has a key; it used to wait for every trustee.
@@ -116,7 +121,7 @@ CREATE TABLE IF NOT EXISTS ws_members (
 CREATE INDEX IF NOT EXISTS ws_members_ws ON ws_members(workspace_id);
 CREATE TABLE IF NOT EXISTS ws_roles (
   member_id TEXT NOT NULL REFERENCES ws_members(id) ON DELETE CASCADE,
-  role TEXT NOT NULL, assigned_by TEXT, assigned_at TEXT NOT NULL, removed_at TEXT,
+  role TEXT NOT NULL, assigned_by TEXT, assigned_at TEXT NOT NULL, removed_at TEXT, removed_by_vote_id TEXT,
   PRIMARY KEY (member_id, role)
 );
 CREATE TABLE IF NOT EXISTS ws_sessions (

@@ -13,7 +13,7 @@ export async function startApp(over = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'ludlow-'));
   const logs = [];
   setLogSink((l) => logs.push(l));
-  const app = await createApp({ dbPath: path.join(dir, 'test.db'), masterKey: C.b64(C.randomBytes(32)), rateLimitDisabled: true, emailProvider: 'dev', ...over });
+  const app = await createApp({ dbPath: path.join(dir, 'test.db'), masterKey: C.b64(C.randomBytes(32)), rateLimitDisabled: true, emailProvider: 'dev', minVoteHours: 0, ...over }); // minVoteHours 0: tests open votes that close in an hour, not a day
   const port = await app.listen(0, '127.0.0.1');
   const base = `http://127.0.0.1:${port}`;
   async function call(method, url, { body, auth } = {}) {
@@ -118,5 +118,5 @@ export async function makeWorkspace(h, people, { stage = 'recognized' } = {}) {
     members.push(await login(h, { id: c.json.memberId, keys, ...people[i] }));
   }
   const as = (i, method, url, body) => h.call(method, url, { body, auth: members[i].auth });
-  return { wsId, members, as };
+  return { wsId, members, as, h };
 }

@@ -31,8 +31,10 @@ async function cast(ws, idx, vote, option) {
   const b = C.castBallot(vote.votePublicKey, option);
   return { r: await ws.as(idx, 'POST', `/api/ws/votes/${vote.id}/ballot`, { ciphertext: b.ciphertext, receiptHash: b.receiptHash }), receipt: b.receiptCode };
 }
+// A vote ends at its closing time (or when everyone has voted). Tests move the closing time into the past instead of waiting for it.
+const endVote = (ws, voteId) => ws.h.app.db.prepare('UPDATE ws_votes SET closes_at=? WHERE id=?').run(new Date(Date.now() - 1000).toISOString(), voteId);
 async function tally(ws, closer, vote, committeeIdx, { publish = true } = {}) {
-  await ws.as(closer, 'POST', `/api/ws/votes/${vote.id}/close`);
+  endVote(ws, vote.id);
   const shares = []; let bundle;
   for (const i of committeeIdx) {
     bundle = (await ws.as(i, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json;
@@ -231,7 +233,7 @@ describe('workspace: secret ballots and self-executing votes', () => {
     const vote = await openVote(ws, 0, { title: 'Second dues', type: 'dues_change', options: ['Yes', 'No'], effect: { kind: 'dues', name: 'Higher dues', amountCents: 9900 } });
     for (const i of [0, 1, 2]) await cast(ws, i, vote, 1);
     for (const i of [3, 4]) await cast(ws, i, vote, 0);
-    await ws.as(1, 'POST', `/api/ws/votes/${vote.id}/close`);
+    endVote(ws, vote.id);
     const bundle = (await ws.as(1, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json;
     const share = (i) => C.boxOpen(bundle.committee.find((c) => c.memberId === ws.members[i].id).sealed, ws.members[i].keys.boxPublicKey, ws.members[i].keys.boxSecretKey);
     await assert.rejects(C.reconstructVoteKey([share(1)])); // 1 of 3 cannot rebuild the key
@@ -258,7 +260,9 @@ describe('workspace: secret ballots and self-executing votes', () => {
     const { res } = await runVote(ws, { title: 'Recall Sam', type: 'recall', effect: { kind: 'role_revoke', memberId: ws.members[7].id, role: 'steward' } }, [0, 1, 2, 3], [4, 5]);
     assert.equal(res.json.effectApplied, 'role_revoke');
     assert.ok(!(await ws.as(7, 'GET', '/api/ws/me')).json.roles.includes('steward'));
-    await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[7].id, role: 'steward', op: 'add' });
+    // a role the members took away by a vote does not come back through the officers' role screen
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[7].id, role: 'steward', op: 'add' })).json.error, 'removed_by_vote');
+    h.app.db.prepare("UPDATE ws_roles SET removed_at=NULL, removed_by_vote_id=NULL WHERE member_id=? AND role='steward'").run(ws.members[7].id); // restore Sam for the tests that follow
   });
 
   it('members can force a vote: a petition qualifies at the threshold and opens exactly as written', async () => {
@@ -275,6 +279,125 @@ describe('workspace: secret ballots and self-executing votes', () => {
     const vote = await openVote(ws, 1, { petitionId: mk.json.petitionId, title: 'A different title the committee would prefer', type: 'general', options: ['Maybe', 'Never'] });
     assert.deepEqual([vote.title, vote.options], ['Vote on Saturday shifts', ['Yes', 'No']]); // the committee cannot reword it
     assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions[0].status, 'opened');
+  });
+});
+
+describe('workspace: one person cannot make up a result, or take power alone', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+  const post = (idx, vote, body) => ws.as(idx, 'POST', `/api/ws/votes/${vote.id}/results`, body);
+  const attest = (vote, counts, idxs) => idxs.map((i) => ({ memberId: ws.members[i].id, signature: C.signTally(ws.members[i].keys.signSecretKey, vote.id, counts) }));
+
+  it('a result nobody can recount needs k committee signatures over the same counts; one member cannot make one up', async () => {
+    const vote = await openVote(ws, 0, { title: 'Authorize a strike?', type: 'strike_authorization', options: ['Yes', 'No'], passRule: 'majority' });
+    for (const i of [0, 1, 2, 4]) await cast(ws, i, vote, 0);
+    await cast(ws, 5, vote, 1);
+    endVote(ws, vote.id);
+    const short = (r) => { assert.equal(r.status, 403); assert.equal(r.json.error, 'not_enough_committee'); };
+    short(await post(1, vote, { counts: [5, 0] })); // one committee member posting whatever they like
+    short(await post(1, vote, { counts: [5, 0], attestations: attest(vote, [5, 0], [1]) })); // ...even signing it themselves
+    short(await post(1, vote, { counts: [4, 1], attestations: [...attest(vote, [4, 1], [1]), ...attest(vote, [5, 0], [3])] })); // a second signature over different counts is worth nothing
+    short(await post(1, vote, { counts: [4, 1], attestations: [...attest(vote, [4, 1], [1]), ...attest(vote, [4, 1], [5])] })); // Marco is not on the committee
+    short(await post(1, vote, { counts: [4, 1], attestations: [...attest(vote, [4, 1], [1]), ...attest(vote, [4, 1], [1])] })); // signing twice is still one member
+    const other = await openVote(ws, 0, { title: 'Another question', type: 'general', options: ['Yes', 'No'] });
+    short(await post(1, vote, { counts: [4, 1], attestations: [...attest(vote, [4, 1], [1]), { memberId: ws.members[3].id, signature: attest(other, [4, 1], [3])[0].signature }] })); // a signature for another vote
+    assert.equal(h.app.db.prepare('SELECT status FROM ws_votes WHERE id=?').get(vote.id).status, 'closed'); // none of that recorded anything
+    const ok = await post(1, vote, { counts: [4, 1], attestations: attest(vote, [4, 1], [1, 3]) }); // two different committee members who each signed these counts
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.deepEqual([ok.json.results.counts, ok.json.results.passed, ok.json.results.verifiable, ok.json.results.attestedBy], [[4, 1], true, false, 2]);
+  });
+
+  it('a decision that changes dues, rules or roles is always counted in the open: the ballot key is required', async () => {
+    const vote = await openVote(ws, 0, { title: 'Raise dues', type: 'dues_change', options: ['Yes', 'No'], effect: { kind: 'dues', name: 'Made-up dues', amountCents: 50_000 } });
+    for (const i of [0, 1]) await cast(ws, i, vote, 1); // both vote No
+    endVote(ws, vote.id);
+    const forged = await post(1, vote, { counts: [2, 0], attestations: attest(vote, [2, 0], [1, 2, 3]) }); // even every committee member's signature is not enough
+    assert.equal(forged.status, 409);
+    assert.equal(forged.json.error, 'key_required');
+    assert.equal((await ws.as(4, 'GET', '/api/ws/finance/summary')).json.dues.length, 0);
+  });
+
+  it('refuses to count when the ballots and receipts do not match who voted', async () => {
+    const vote = await openVote(ws, 0, { title: 'Stuffed box', type: 'general', options: ['Yes', 'No'] });
+    await cast(ws, 4, vote, 1);
+    const extra = C.castBallot(vote.votePublicKey, 0); // someone with database access adds a ballot nobody cast
+    h.app.db.prepare('INSERT INTO ws_ballots (id,vote_id,choice_ciphertext) VALUES (?,?,?)').run(crypto.randomUUID(), vote.id, extra.ciphertext);
+    const res = await tally(ws, 1, vote, [1, 3]);
+    assert.equal(res.status, 409);
+    assert.deepEqual([res.json.error, res.json.ballots, res.json.voted], ['ballot_count_mismatch', 2, 1]);
+  });
+
+  it('"No" can never win as "passed": a decision with an effect has fixed options and a real rule', async () => {
+    // a recall asked with "plurality": any unique winner counted as passed, so "Keep in office" removed the role
+    const recall = await openVote(ws, 0, { title: 'Recall Sam', type: 'recall', passRule: 'plurality', effect: { kind: 'role_revoke', memberId: ws.members[7].id, role: 'steward' } });
+    assert.equal(recall.passRule, 'majority');
+    for (const i of [0, 1, 2, 3]) await cast(ws, i, recall, 1); // keep
+    for (const i of [4, 5]) await cast(ws, i, recall, 0); // remove
+    const res = await tally(ws, 1, recall, [1, 3]);
+    assert.deepEqual([res.json.results.passed, res.json.effectApplied], [false, null]);
+    assert.ok((await ws.as(7, 'GET', '/api/ws/me')).json.roles.includes('steward'));
+    // dues cannot be worded so that "Yes" means "keep things as they are"
+    const dues = await openVote(ws, 0, { title: 'Dues', type: 'dues_change', options: ['Keep dues as they are', 'Raise to $500'], passRule: 'plurality', effect: { kind: 'dues', name: 'Five hundred', amountCents: 50_000 } });
+    assert.deepEqual([dues.options, dues.passRule], [['Yes', 'No'], 'majority']);
+  });
+
+  it('nobody can run their own recall, and a recalled role is not handed back', async () => {
+    const ring = (await ws.as(0, 'GET', '/api/ws/keyring?role=election_committee')).json.holders;
+    const spec = (holders) => C.newVoteKeys(holders, 2).then((vk) => ({ title: 'Recall Enzo', type: 'recall', effect: { kind: 'role_revoke', memberId: ws.members[1].id, role: 'officer' },
+      closesAt: new Date(Date.now() + 3600_000).toISOString(), votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: 2 }));
+    assert.equal((await ws.as(0, 'POST', '/api/ws/votes', await spec(ring))).json.error, 'committee_conflict'); // the target is on the committee that would count it
+    const clean = await spec(ring.filter((x) => x.memberId !== ws.members[1].id));
+    assert.equal((await ws.as(1, 'POST', '/api/ws/votes', clean)).json.error, 'committee_conflict'); // ...or opens it himself
+    assert.equal((await ws.as(0, 'POST', '/api/ws/votes', clean)).status, 200); // someone else can
+  });
+
+  it('adding people to the roster cannot create voting members or officers, and nobody grants themselves a role', async () => {
+    const r = await ws.as(0, 'POST', '/api/ws/members', { members: [{ legalName: 'Fake Officer', claimTokenHash: C.hashToken(C.newToken()), status: 'member', roles: ['officer', 'treasurer'] }] });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(h.app.db.prepare('SELECT membership_status s FROM ws_members WHERE id=?').get(r.json.memberIds[0]).s, 'unit_employee'); // status comes from the server, not the request
+    assert.equal(h.app.db.prepare('SELECT COUNT(*) c FROM ws_roles WHERE member_id=?').get(r.json.memberIds[0]).c, 0);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: r.json.memberIds[0], role: 'officer', op: 'add' })).json.error, 'not_a_member'); // and someone who has not joined cannot hold a role
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[0].id, role: 'election_committee', op: 'add' })).json.error, 'no_self_assign');
+  });
+
+  it('a founding roster that lists a role twice is accepted, not a server error', async () => {
+    const t = await makeWorkspace(h, [person('Dup Officer', 0, { roles: ['officer', 'officer', 'treasurer'] }), person('Worker Two', 1)]);
+    assert.equal(t.members.length, 2);
+  });
+
+  it('the export does not reveal ballots while a vote is open, and it shows in every member\'s access log', async () => {
+    const vote = await openVote(ws, 0, { title: 'Still open', type: 'general', options: ['Yes', 'No'] });
+    await cast(ws, 4, vote, 0);
+    const seen = async () => (await ws.as(4, 'GET', '/api/ws/me/access-log')).json.entries.filter((e) => e.action === 'member.pii.read').length;
+    const before = await seen();
+    const open = (await ws.as(0, 'GET', '/api/ws/export')).json.votes.find((v) => v.id === vote.id);
+    assert.deepEqual([open.ballots, open.receiptHashes], [[], []]); // reading them as they arrive would isolate each ballot with its receipt
+    assert.equal(await seen(), before + 1); // Mona can see that an officer exported her details
+    await tally(ws, 1, vote, [1, 3]);
+    const done = (await ws.as(0, 'GET', '/api/ws/export')).json.votes.find((v) => v.id === vote.id);
+    assert.equal(done.ballots.length, 1); // after the count they are part of the record
+  });
+});
+
+describe('workspace: a vote cannot be opened so briefly that nobody sees it, or ended early', () => {
+  let h, ws;
+  before(async () => { h = await startApp({ minVoteHours: 24 }); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('refuses a voting window shorter than the minimum, and refuses to end a vote before everyone has voted', async () => {
+    const ring = (await ws.as(0, 'GET', '/api/ws/keyring?role=election_committee')).json.holders;
+    const vk = await C.newVoteKeys(ring, 2);
+    const base = { title: 'Short window', type: 'general', options: ['Yes', 'No'], votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: 2 };
+    for (const ms of [2_000, 3600_000, 23 * 3600_000]) assert.equal((await ws.as(0, 'POST', '/api/ws/votes', { ...base, closesAt: new Date(Date.now() + ms).toISOString() })).status, 400, String(ms));
+    const ok = await ws.as(0, 'POST', '/api/ws/votes', { ...base, closesAt: new Date(Date.now() + 24 * 3600_000).toISOString() });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    const vote = (await ws.as(0, 'GET', `/api/ws/votes/${ok.json.voteId}`)).json;
+    assert.equal((await ws.as(0, 'POST', `/api/ws/votes/${vote.id}/close`)).json.error, 'vote_still_open'); // nobody can end it while members are still to vote
+    for (const i of V.slice(0, 6)) await cast(ws, i, vote, 0);
+    assert.equal((await ws.as(0, 'POST', `/api/ws/votes/${vote.id}/close`)).json.error, 'vote_still_open'); // 6 of 7
+    await cast(ws, V[6], vote, 0);
+    assert.equal((await ws.as(0, 'POST', `/api/ws/votes/${vote.id}/close`)).json.status, 'closed'); // everyone has voted
   });
 });
 
@@ -334,6 +457,9 @@ describe('workspace: money you can audit', () => {
     assert.throws(() => h.app.db.prepare('UPDATE ws_ledger SET amount_cents=1').run(), /immutable/);
     assert.throws(() => h.app.db.prepare('DELETE FROM ws_ledger').run(), /immutable/);
     assert.throws(() => h.app.db.prepare('UPDATE ws_audit SET action=?').run('x'), /append-only/);
+    // INSERT OR REPLACE deletes the row it replaces; without recursive triggers it did so without tripping the guards above
+    assert.throws(() => h.app.db.prepare('INSERT OR REPLACE INTO ws_ledger SELECT * FROM ws_ledger WHERE seq=1').run(), /immutable/);
+    assert.throws(() => h.app.db.prepare('INSERT OR REPLACE INTO ws_audit SELECT * FROM ws_audit WHERE seq=1').run(), /append-only/);
     const rows = (await ws.as(4, 'GET', '/api/ws/finance/summary')).json.entries;
     const receipt = rows.find((e) => e.kind === 'receipt');
     const rev = await ws.as(0, 'POST', `/api/ws/ledger/${h.app.db.prepare('SELECT id FROM ws_ledger WHERE seq=?').get(receipt.seq).id}/reverse`, { reason: 'Entered twice' });
@@ -430,6 +556,25 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/notes`, note)).status, 200);
     const seen = (await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json.notes[0];
     assert.match(C.openJson(key, seen, 'note|' + id).note, /met with the manager/);
+  });
+
+  it('a chief steward with no key for a case cannot work it, and assigning never replaces anyone\'s key', async () => {
+    // Ezra becomes a chief steward AFTER the case was filed, so no key for it was ever sealed to him
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[3].id, role: 'chief_steward', op: 'add' })).status, 200);
+    const before = h.app.db.prepare('SELECT sealed_keys k, assigned_to a, decision d, status s FROM ws_grievances WHERE id=?').get(id);
+    assert.equal((await ws.as(3, 'GET', '/api/ws/grievances')).json.grievances.length, 1); // he can see that cases exist...
+    const junk = C.boxSeal(ws.members[3].keys.boxPublicKey, C.randomBytes(32));
+    for (const [route, body] of [['assign', { stewardId: ws.members[3].id, sealedKey: junk }], ['decision', { decision: 'not_pursued', reasonCiphertext: 'x'.repeat(30), reasonNonce: 'y'.repeat(32) }],
+      ['notify-worker', {}], ['close', {}], ['steps/complete', { outcome: 'denied' }], ['notes', { ciphertext: 'x'.repeat(30), nonce: 'y'.repeat(32) }]]) {
+      assert.equal((await ws.as(3, 'POST', `/api/ws/grievances/${id}/${route}`, body)).status, 404, route); // ...but cannot act on one he was never entrusted with
+    }
+    assert.deepEqual(h.app.db.prepare('SELECT sealed_keys k, assigned_to a, decision d, status s FROM ws_grievances WHERE id=?').get(id), before); // nothing changed
+    // a key holder cannot overwrite another person's key either (a junk key would lock the real steward out)
+    const samKey = JSON.parse(before.k)[ws.members[STEW].id];
+    assert.ok(samKey);
+    assert.equal((await ws.as(CHIEF, 'POST', `/api/ws/grievances/${id}/assign`, { stewardId: ws.members[STEW].id, sealedKey: C.boxSeal(ws.members[STEW].keys.boxPublicKey, C.randomBytes(32)) })).status, 200);
+    assert.equal(JSON.parse(h.app.db.prepare('SELECT sealed_keys k FROM ws_grievances WHERE id=?').get(id).k)[ws.members[STEW].id], samKey);
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[3].id, role: 'chief_steward', op: 'remove' })).status, 200);
   });
 
   it('steps start their own clocks, and overdue steps show up for the union', async () => {

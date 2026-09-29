@@ -250,3 +250,19 @@ test('key words: ten words that identify a public key, stable, distinct, and the
   for (let i = 0; i < 300; i++) seen.add(C.keyWords(C.newKeypairs().boxPublicKey));
   assert.equal(seen.size, 300);
 });
+
+test('committee tally signatures: bound to the vote and the counts, and only the signer verifies', () => {
+  const a = C.newKeypairs(), b = C.newKeypairs();
+  const sig = C.signTally(a.signSecretKey, 'vote-1', [4, 1]);
+  assert.ok(C.verifyTally(a.signPublicKey, sig, 'vote-1', [4, 1]));
+  assert.ok(!C.verifyTally(a.signPublicKey, sig, 'vote-2', [4, 1])); // another vote
+  assert.ok(!C.verifyTally(a.signPublicKey, sig, 'vote-1', [5, 0])); // other counts
+  assert.ok(!C.verifyTally(a.signPublicKey, sig, 'vote-1', [4, 1, 0])); // a different number of options
+  assert.ok(!C.verifyTally(b.signPublicKey, sig, 'vote-1', [4, 1])); // someone else's key
+  assert.ok(!C.verifyTally(a.signPublicKey, flip(sig), 'vote-1', [4, 1])); // a tampered signature
+  assert.ok(!C.verifyTally(a.signPublicKey, 'not base64!', 'vote-1', [4, 1]));
+  assert.ok(!C.verifyTally('not a key', sig, 'vote-1', [4, 1]));
+  // a sign-in signature cannot be replayed as a tally signature: different message, different domain
+  const login = C.signAuth(a.signSecretKey, { nonce: 'n', route: 'r', scope: 's' });
+  assert.ok(!C.verifyTally(a.signPublicKey, login, 'r', []));
+});
