@@ -1,0 +1,28 @@
+name: Bug report
+description: Something is broken or behaves wrongly.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping. **Never include real names, workplaces, member data or real links/keys.** Use invented data. If this is a **security or privacy** problem, stop and report it privately instead (see the link on the issue chooser).
+  - type: textarea
+    id: what
+    attributes: { label: What happened?, description: What did you expect instead? }
+    validations: { required: true }
+  - type: textarea
+    id: steps
+    attributes: { label: Steps to reproduce, placeholder: "1. ...\n2. ...\n3. ..." }
+    validations: { required: true }
+  - type: input
+    id: env
+    attributes: { label: Environment, placeholder: "Browser + version, OS, Node version if running locally" }
+  - type: dropdown
+    id: privacy
+    attributes:
+      label: Could this expose anyone's data or weaken a protection?
+      options: ["No", "Not sure", "Yes (I will report it privately instead)"]
+    validations: { required: true }
+  - type: textarea
+    id: extra
+    attributes: { label: Screenshots or logs, description: Remove anything personal first. }

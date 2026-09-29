@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question or share an idea
+    url: https://github.com/ChrisRyanWill/project-ludlow/discussions
+    about: Questions, organizing experience, translations, and half-formed ideas are all welcome here.
+  - name: Report a security vulnerability (private)
+    url: https://github.com/ChrisRyanWill/project-ludlow/security/advisories/new
+    about: Please do not open a public issue for a vulnerability. Report it privately here.

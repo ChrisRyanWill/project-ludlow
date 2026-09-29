@@ -1,0 +1,7 @@
+# Security- and legal-sensitive areas always get a maintainer's review.
+/shared/crypto.js   @ChrisRyanWill
+/server/            @ChrisRyanWill
+/content/legal/     @ChrisRyanWill
+/docs/              @ChrisRyanWill
+/.github/           @ChrisRyanWill
+*                   @ChrisRyanWill

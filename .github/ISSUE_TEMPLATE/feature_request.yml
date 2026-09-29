@@ -1,0 +1,23 @@
+name: Feature or improvement
+description: Propose something new, or a better way to do something.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes: { label: What problem does this solve, and for whom?, description: "Organizers, trustees, officers, members, stewards, translators?" }
+    validations: { required: true }
+  - type: textarea
+    id: idea
+    attributes: { label: What do you propose? }
+    validations: { required: true }
+  - type: textarea
+    id: risks
+    attributes:
+      label: Privacy, security or legal implications
+      description: Does it touch personal data, keys, the release lock, votes, money or legal text? Cite a source for any legal claim.
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Participation
+      options:
+        - label: I would like to work on this myself.

@@ -1,0 +1,50 @@
+{
+  "name": "project-ludlow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Project Ludlow: form a union with zero-knowledge authorization cards, then run it democratically.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "start": "node scripts/build.js && node server/index.js",
+    "dev": "node scripts/build.js && node --watch server/index.js",
+    "test": "node scripts/build.js && node --test --test-concurrency=1 test/",
+    "test:unit": "node --test test/unit.test.js",
+    "test:api": "node --test --test-concurrency=1 test/campaign.test.js test/workspace.test.js",
+    "test:e2e": "node scripts/build.js && node --test --test-concurrency=1 --test-timeout=560000 test/e2e.test.js",
+    "build:site": "node scripts/build-site.js",
+    "test:site": "node scripts/build-site.js && node --test test/site.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "libsodium-wrappers-sumo": "^0.8.4",
+    "pdf-lib": "^1.17.1",
+    "qrcode-generator": "^2.0.4",
+    "shamir-secret-sharing": "^0.0.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.63.0"
+  },
+  "license": "AGPL-3.0-only",
+  "homepage": "https://chrisryanwill.github.io/project-ludlow/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChrisRyanWill/project-ludlow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ChrisRyanWill/project-ludlow/issues"
+  },
+  "keywords": [
+    "union",
+    "labor",
+    "organizing",
+    "privacy",
+    "end-to-end-encryption",
+    "secret-ballot",
+    "worker-power"
+  ]
+}

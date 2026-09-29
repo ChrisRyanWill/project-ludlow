@@ -1,0 +1,494 @@
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import * as C from '../shared/crypto.js';
+import * as D from '../shared/deadlines.js';
+import { verifyChain, ledgerFields, auditFields, checkPinned } from '../shared/verify.js';
+import { can, ROLES } from '../shared/permissions.js';
+import { startApp, makeWorkspace, login } from './helpers.js';
+
+const person = (name, i, extra = {}) => ({ name, email: `${name.split(' ')[0].toLowerCase()}+leak@example.com`, phone: `+155501990${i}0`, address: `${i} Leakcheck Lane`, jobTitle: 'Leakcheck Barista', status: 'member', shift: i < 6 ? 'Day' : 'Night', ...extra });
+const PEOPLE = [
+  person('Ofelia Qqqofficer', 0, { roles: ['officer', 'treasurer', 'chief_steward'] }),
+  person('Enzo Qqqelect', 1, { roles: ['officer', 'election_committee'] }),
+  person('Elena Qqqelect', 2, { roles: ['officer', 'election_committee'] }),
+  person('Ezra Qqqelect', 3, { roles: ['election_committee'] }),
+  person('Mona Qqqmember', 4),
+  person('Marco Qqqmember', 5),
+  person('Una Qqqunit', 6, { status: 'unit_employee' }), // a unit employee who has not joined the union
+  person('Sam Qqqsteward', 7, { roles: ['steward'] }),
+];
+const NEEDLES = [...PEOPLE.flatMap((p) => [p.name, p.email, p.phone, p.address]), 'Leakcheck Barista', 'Zyxwvut grievance narrative', 'Zyxwvut reason', 'Zyxwvut Payee', 'Zyxwvut memo'];
+const V = [0, 1, 2, 3, 4, 5, 7]; // indexes of the union's members (Una has not joined)
+
+async function openVote(ws, idx, spec, k = 2) {
+  const ring = await ws.as(idx, 'GET', '/api/ws/keyring?role=election_committee');
+  const vk = await C.newVoteKeys(ring.json.holders, k);
+  const r = await ws.as(idx, 'POST', '/api/ws/votes', { closesAt: new Date(Date.now() + 3600_000).toISOString(), votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: k, ...spec });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  return (await ws.as(idx, 'GET', `/api/ws/votes/${r.json.voteId}`)).json;
+}
+async function cast(ws, idx, vote, option) {
+  const b = C.castBallot(vote.votePublicKey, option);
+  return { r: await ws.as(idx, 'POST', `/api/ws/votes/${vote.id}/ballot`, { ciphertext: b.ciphertext, receiptHash: b.receiptHash }), receipt: b.receiptCode };
+}
+async function tally(ws, closer, vote, committeeIdx, { publish = true } = {}) {
+  await ws.as(closer, 'POST', `/api/ws/votes/${vote.id}/close`);
+  const shares = []; let bundle;
+  for (const i of committeeIdx) {
+    bundle = (await ws.as(i, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json;
+    const mine = bundle.committee.find((c) => c.memberId === ws.members[i].id);
+    shares.push(C.boxOpen(mine.sealed, ws.members[i].keys.boxPublicKey, ws.members[i].keys.boxSecretKey));
+  }
+  const sk = await C.reconstructVoteKey(shares);
+  const { counts } = C.countBallots(bundle.votePublicKey, sk, bundle.ballots, bundle.options.length);
+  return ws.as(committeeIdx[0], 'POST', `/api/ws/votes/${vote.id}/results`, publish ? { counts, secretKey: sk } : { counts });
+}
+async function runVote(ws, spec, yes, no, committeeIdx = [1, 3]) {
+  const vote = await openVote(ws, 0, spec);
+  const receipts = [];
+  for (const i of yes) receipts.push((await cast(ws, i, vote, 0)).receipt);
+  for (const i of no) receipts.push((await cast(ws, i, vote, 1)).receipt);
+  const res = await tally(ws, 1, vote, committeeIdx);
+  return { vote, res, receipts };
+}
+
+describe('workspace: founding, accounts, audit', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('refuses to found a workspace unless the union has confirmed it already went public', async () => {
+    const body = { stage: 'recognized', unionName: 'U', employerName: 'E', members: [{ legalName: 'A B', roles: ['officer'], claimTokenHash: C.hashToken(C.newToken()) }] };
+    assert.equal((await h.call('POST', '/api/ws', { body })).json.error, 'confirmation_required');
+    assert.equal((await h.call('POST', '/api/ws', { body: { ...body, confirmedPublic: 'yes' } })).json.error, 'confirmation_required');
+    assert.equal((await h.call('POST', '/api/ws', { body: { ...body, confirmedPublic: true, members: [{ ...body.members[0], roles: [] }] } })).json.error, 'officer_required');
+    assert.equal((await h.call('POST', '/api/ws', { body: { ...body, confirmedPublic: true } })).status, 200);
+  });
+
+  it('claim tokens are single-use, and sign-in needs a fresh signature', async () => {
+    const tok = C.newToken();
+    const r = await h.call('POST', '/api/ws', { body: { confirmedPublic: true, stage: 'recognized', unionName: 'U', employerName: 'E', members: [{ legalName: 'C D', roles: ['officer'], claimTokenHash: C.hashToken(tok) }] } });
+    const keys = C.newKeypairs();
+    const claim = { workspaceId: r.json.workspaceId, claimToken: tok, boxPublicKey: keys.boxPublicKey, signPublicKey: keys.signPublicKey };
+    const c1 = await h.call('POST', '/api/ws/claim', { body: claim });
+    assert.equal(c1.status, 200);
+    assert.equal((await h.call('POST', '/api/ws/claim', { body: claim })).status, 401);
+    const { json: ch } = await h.call('POST', '/api/auth/challenge');
+    const signature = C.signAuth(keys.signSecretKey, { nonce: ch.nonce, route: 'POST /api/ws/auth/login', scope: c1.json.memberId });
+    const body = { memberId: c1.json.memberId, challengeId: ch.challengeId, signature };
+    assert.equal((await h.call('POST', '/api/ws/auth/login', { body })).status, 200);
+    assert.equal((await h.call('POST', '/api/ws/auth/login', { body })).status, 401); // replay
+    assert.equal((await h.call('GET', '/api/ws/me')).status, 401);
+    assert.equal((await h.call('GET', '/api/ws/me', { auth: 'Bearer ' + C.newToken() })).status, 401);
+  });
+
+  it('sessions expire when idle', async () => {
+    const m = await login(h, { ...ws.members[4] });
+    assert.equal((await h.call('GET', '/api/ws/me', { auth: m.auth })).status, 200);
+    h.app.db.prepare('UPDATE ws_sessions SET last_seen_at=? WHERE token_hash=?').run(new Date(Date.now() - 13 * 3600_000).toISOString(), C.hashToken(m.token));
+    assert.equal((await h.call('GET', '/api/ws/me', { auth: m.auth })).json.error, 'session_expired');
+  });
+
+  it('personal data is readable to permitted roles and every read is logged where the member can see it', async () => {
+    const roster = await ws.as(0, 'GET', '/api/ws/roster');
+    assert.equal(roster.json.members.length, 8);
+    const una = roster.json.members.find((m) => m.name.startsWith('Una'));
+    assert.deepEqual([una.email, una.phone, una.address, una.jobTitle], ['una+leak@example.com', '+15550199060', '6 Leakcheck Lane', 'Leakcheck Barista']);
+    assert.equal((await ws.as(4, 'GET', '/api/ws/roster')).status, 403);
+    const log = await ws.as(6, 'GET', '/api/ws/me/access-log');
+    assert.ok(log.json.entries.some((e) => e.action === 'member.pii.read' && e.actor.startsWith('Ofelia')));
+    assert.equal((await ws.as(4, 'GET', '/api/ws/me/access-log')).json.entries.length, 1);
+    const own = await ws.as(0, 'GET', '/api/ws/me/access-log'); // your own reads are not "someone else" looking
+    assert.equal(own.json.entries.length, 0);
+  });
+
+  it('roles: assigned by officers, visible to everyone, and the last officer cannot be removed', async () => {
+    assert.equal((await ws.as(4, 'POST', '/api/ws/roles', { memberId: ws.members[4].id, role: 'officer', op: 'add' })).status, 403);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[4].id, role: 'steward', op: 'add' })).status, 200);
+    const list = await ws.as(6, 'GET', '/api/ws/roles');
+    assert.ok(list.json.roles.some((r) => r.role === 'steward' && r.name.startsWith('Mona')));
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[4].id, role: 'steward', op: 'remove' })).status, 200);
+    for (const i of [1, 2]) await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[i].id, role: 'officer', op: 'remove' });
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[0].id, role: 'officer', op: 'remove' })).json.error, 'last_officer');
+    for (const i of [1, 2]) await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[i].id, role: 'officer', op: 'add' });
+  });
+
+  it('the union owns its data: officers can export everything, and the export itself is audited', async () => {
+    const before = h.logs.length;
+    const ex = await ws.as(0, 'GET', '/api/ws/export');
+    assert.equal(ex.status, 200);
+    assert.equal(ex.json.format, 'ludlow-export-v1');
+    assert.equal(ex.json.members.length, 8);
+    assert.ok(ex.json.members.some((m) => m.email === 'una+leak@example.com')); // readable to the union that owns it
+    assert.ok(ex.json.audit.length >= 8);
+    assert.equal((await ws.as(4, 'GET', '/api/ws/export')).status, 403);
+    const log = (await ws.as(0, 'GET', '/api/ws/audit')).json.entries;
+    assert.ok(log.some((e) => e.action === 'export.all' && e.actor.startsWith('Ofelia')));
+    assert.ok(h.logs.slice(before).every((l) => !l.includes('una+leak'))); // and never in server logs
+  });
+
+  it('announcements and joining the union', async () => {
+    assert.equal((await ws.as(4, 'POST', '/api/ws/announcements', { title: 't', body: 'b' })).status, 403);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/announcements', { title: 'First meeting', body: 'Thursday at noon.' })).status, 200);
+    assert.equal((await ws.as(6, 'GET', '/api/ws/announcements')).json.items[0].title, 'First meeting');
+    assert.equal((await ws.as(6, 'GET', '/api/ws/me')).json.roles.includes('member'), false);
+    await ws.as(6, 'POST', '/api/ws/me/join');
+    assert.ok((await ws.as(6, 'GET', '/api/ws/me')).json.roles.includes('member'));
+    h.app.db.prepare("UPDATE ws_members SET membership_status='unit_employee', joined_at=NULL WHERE id=?").run(ws.members[6].id); // back to a non-member for later tests
+  });
+
+  it('plaintext-leak test: names, emails, phones, addresses and job titles are ciphertext on disk, and no token is logged', () => {
+    assert.deepEqual(h.leaks([...NEEDLES, ...ws.members.map((m) => m.token)]), []);
+    const row = h.app.db.prepare('SELECT legal_name_enc, email_enc FROM ws_members LIMIT 1').get();
+    assert.match(row.legal_name_enc, /^v1\./);
+  });
+});
+
+describe('workspace: the permission matrix', () => {
+  let h, mx;
+  const ROLE_PEOPLE = [
+    ['super', { roles: ['officer', 'treasurer', 'chief_steward', 'steward', 'election_committee'] }],
+    ['unit_employee', { status: 'unit_employee' }], ['member', {}],
+    ['steward', { roles: ['steward'] }], ['chief_steward', { roles: ['chief_steward'] }], ['officer', { roles: ['officer'] }],
+    ['treasurer', { roles: ['treasurer'] }], ['election_committee', { roles: ['election_committee'] }],
+  ];
+  before(async () => { h = await startApp(); mx = await makeWorkspace(h, ROLE_PEOPLE.map(([n, e], i) => person('Matrix ' + n.replace('_', ''), i, e))); });
+  after(() => h.stop());
+
+  it('every workspace route × every role matches shared/permissions.js, and anonymous callers get 401', async () => {
+    const routes = h.app.router.routes.filter((r) => r.opts.ws);
+    assert.ok(routes.length >= 45, 'found ' + routes.length + ' workspace routes');
+    const skip = new Set(['/api/ws/auth/logout', '/api/ws/me/join', '/api/ws/me/profile']); // always allowed; they change the caller
+    let checked = 0;
+    for (const r of routes) {
+      const url = r.pattern.replace(/:(\w+)/g, (_, k) => (k === 'key' ? 'lm1' : crypto.randomUUID()));
+      assert.equal((await h.call(r.method, url)).status, 401, 'anonymous: ' + r.method + ' ' + r.pattern);
+      if (skip.has(r.pattern)) continue;
+      for (let i = 1; i < ROLE_PEOPLE.length; i++) {
+        const [name, extra] = ROLE_PEOPLE[i];
+        const roles = new Set(['unit_employee', ...(extra.status === 'unit_employee' ? [] : ['member']), ...(extra.roles || [])]);
+        const res = await mx.as(i, r.method, url, ['GET', 'HEAD'].includes(r.method) ? undefined : {});
+        const allowed = can(roles, r.opts.action);
+        assert.equal(res.status === 403, !allowed, `${name} ${r.method} ${r.pattern} (${r.opts.action}) -> ${res.status} ${JSON.stringify(res.json)}`);
+        checked++;
+      }
+    }
+    assert.ok(checked > 250, 'checked ' + checked);
+  });
+});
+
+describe('workspace: secret ballots and self-executing votes', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('a vote is opened by the committee; only members vote; nobody votes twice, even in a race', async () => {
+    const vote = await openVote(ws, 0, { title: 'Test question', type: 'general', options: ['Yes', 'No'], passRule: 'majority' });
+    assert.equal(vote.turnout.eligible, 7);
+    assert.equal((await cast(ws, 6, vote, 0)).r.status, 403); // Una has not joined
+    assert.equal((await cast(ws, 4, vote, 0)).r.status, 200);
+    assert.equal((await cast(ws, 4, vote, 1)).r.json.error, 'already_voted');
+    const b = C.castBallot(vote.votePublicKey, 1);
+    const race = await Promise.all(Array.from({ length: 8 }, () => ws.as(5, 'POST', `/api/ws/votes/${vote.id}/ballot`, { ciphertext: b.ciphertext, receiptHash: b.receiptHash })));
+    assert.deepEqual(race.map((r) => r.status).sort(), [200, 409, 409, 409, 409, 409, 409, 409]);
+    assert.equal(h.app.db.prepare('SELECT COUNT(*) c FROM ws_ballots WHERE vote_id=?').get(vote.id).c, 2);
+    assert.equal((await ws.as(5, 'POST', `/api/ws/votes/${vote.id}/close`)).status, 403); // members cannot close votes
+    assert.equal((await ws.as(0, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).status, 403); // and officers cannot open the ballot box
+    assert.equal((await ws.as(1, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json.error, 'vote_open');
+  });
+
+  it('ballots cannot be linked to voters: no column, no key, no timestamp, nothing in the logs', async () => {
+    const cols = (t) => h.app.db.prepare(`SELECT name FROM pragma_table_info('${t}')`).all().map((c) => c.name);
+    assert.deepEqual(cols('ws_ballots'), ['id', 'vote_id', 'choice_ciphertext']);
+    assert.deepEqual(cols('ws_vote_receipts'), ['vote_id', 'receipt_hash']);
+    assert.deepEqual(cols('ws_vote_participation'), ['vote_id', 'member_id', 'has_voted']);
+    for (const t of ['ws_ballots', 'ws_vote_receipts']) assert.deepEqual(h.app.db.prepare(`SELECT "table" t FROM pragma_foreign_key_list('${t}')`).all().map((r) => r.t), ['ws_votes']);
+    const sql = h.app.db.prepare("SELECT sql FROM sqlite_master WHERE name='ws_ballots'").get().sql;
+    assert.match(sql, /WITHOUT ROWID/); // stored in random-id order, so row order does not reveal cast order
+    const ballotLogs = h.logs.filter((l) => l.includes('/ballot'));
+    assert.ok(ballotLogs.length >= 8);
+    for (const l of ballotLogs) for (const m of ws.members) assert.ok(!l.includes(m.id) && !l.includes(m.token));
+  });
+
+  it('the committee tallies in the browser, the server re-checks it, and every member can recount', async () => {
+    const { vote, res, receipts } = await runVote(ws, { title: 'Set dues', type: 'dues_change', options: ['Yes', 'No'], passRule: 'two_thirds', effect: { kind: 'dues', name: 'Standard dues', amountCents: 3500 } }, [0, 1, 2, 3, 4], [5, 7]);
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.deepEqual(res.json.results.counts, [5, 2]);
+    assert.equal(res.json.results.passed, true); // 5 of 7 is at least two thirds
+    assert.equal(res.json.effectApplied, 'dues'); // the decision executes itself
+    const fin = await ws.as(4, 'GET', '/api/ws/finance/summary');
+    assert.deepEqual([fin.json.dues[0].name, fin.json.dues[0].amountCents, fin.json.dues[0].voteId], ['Standard dues', 3500, vote.id]);
+    // anyone can recount from the published key and check their receipt is in the list
+    const pub = (await ws.as(5, 'GET', `/api/ws/votes/${vote.id}/ballots`)).json;
+    assert.deepEqual(C.countBallots(pub.votePublicKey, pub.secretKey, pub.ballots, 2).counts, [5, 2]);
+    assert.equal(pub.ballots.length, pub.receiptHashes.length);
+    for (const code of receipts) assert.ok(pub.receiptHashes.includes(C.receiptHash(code)));
+    assert.ok(!pub.receiptHashes.includes(C.receiptHash('AAAA-BBBB-CCCC-DDDD')));
+    assert.equal((await ws.as(1, 'POST', `/api/ws/votes/${vote.id}/results`, { counts: [1, 1] })).json.error, 'already_tallied');
+  });
+
+  it('a lying tally is rejected, one committee member alone cannot tally, and a failed vote changes nothing', async () => {
+    const vote = await openVote(ws, 0, { title: 'Second dues', type: 'dues_change', options: ['Yes', 'No'], effect: { kind: 'dues', name: 'Higher dues', amountCents: 9900 } });
+    for (const i of [0, 1, 2]) await cast(ws, i, vote, 1);
+    for (const i of [3, 4]) await cast(ws, i, vote, 0);
+    await ws.as(1, 'POST', `/api/ws/votes/${vote.id}/close`);
+    const bundle = (await ws.as(1, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json;
+    const share = (i) => C.boxOpen(bundle.committee.find((c) => c.memberId === ws.members[i].id).sealed, ws.members[i].keys.boxPublicKey, ws.members[i].keys.boxSecretKey);
+    await assert.rejects(C.reconstructVoteKey([share(1)])); // 1 of 3 cannot rebuild the key
+    const sk = await C.reconstructVoteKey([share(1), share(2)]);
+    assert.equal((await ws.as(1, 'POST', `/api/ws/votes/${vote.id}/results`, { counts: [5, 0], secretKey: sk })).json.error, 'count_mismatch');
+    assert.equal((await ws.as(1, 'POST', `/api/ws/votes/${vote.id}/results`, { counts: [2, 3], secretKey: C.newToken() })).json.error, 'wrong_key');
+    assert.equal((await ws.as(5, 'POST', `/api/ws/votes/${vote.id}/results`, { counts: [2, 3] })).status, 403); // not on the committee
+    const ok = await ws.as(1, 'POST', `/api/ws/votes/${vote.id}/results`, { counts: [2, 3], secretKey: sk });
+    assert.equal(ok.json.results.passed, false);
+    assert.equal(ok.json.effectApplied, null);
+    assert.equal((await ws.as(4, 'GET', '/api/ws/finance/summary')).json.dues.length, 1); // still only the ratified plan
+  });
+
+  it('a passed bylaws amendment rewrites the policy and keeps a version history', async () => {
+    const { vote, res } = await runVote(ws, { title: 'Lower the petition threshold', type: 'bylaws_amendment', options: ['Yes', 'No'], effect: { kind: 'policy', patch: { petitionPct: 5, termMonths: 12 } } }, [0, 1, 2, 3, 4], [5]);
+    assert.equal(res.json.effectApplied, 'policy');
+    const by = (await ws.as(4, 'GET', '/api/ws/bylaws')).json;
+    assert.deepEqual([by.policy.petitionPct, by.policy.termMonths, by.versions.length, by.versions[0].voteId], [5, 12, 2, vote.id]);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/votes', { title: 'x', type: 'bylaws_amendment', options: ['Yes', 'No'], effect: { kind: 'policy', patch: { petitionPct: 999 } } })).status, 400); // out-of-range policy is refused
+  });
+
+  it('online officer elections are off unless enabled; a passed recall removes the role', async () => {
+    assert.equal((await ws.as(0, 'POST', '/api/ws/votes', { title: 'Elect', type: 'officer_election', options: ['A', 'B'] })).json.error, 'feature_disabled');
+    const { res } = await runVote(ws, { title: 'Recall Sam', type: 'recall', effect: { kind: 'role_revoke', memberId: ws.members[7].id, role: 'steward' } }, [0, 1, 2, 3], [4, 5]);
+    assert.equal(res.json.effectApplied, 'role_revoke');
+    assert.ok(!(await ws.as(7, 'GET', '/api/ws/me')).json.roles.includes('steward'));
+    await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[7].id, role: 'steward', op: 'add' });
+  });
+
+  it('members can force a vote: a petition qualifies at the threshold and opens exactly as written', async () => {
+    const mk = await ws.as(4, 'POST', '/api/ws/petitions', { title: 'Vote on Saturday shifts', description: 'Should Saturday shifts be optional?', type: 'general', options: ['Yes', 'No'], passRule: 'majority' });
+    assert.equal(mk.status, 200, JSON.stringify(mk.json));
+    assert.equal(mk.json.needed, 2); // 5% of 7 members, minimum 2
+    assert.equal((await ws.as(6, 'POST', '/api/ws/petitions', { title: 't', type: 'general', options: ['Yes', 'No'] })).status, 403); // must be a member
+    assert.equal((await ws.as(0, 'POST', '/api/ws/votes', { petitionId: mk.json.petitionId, closesAt: new Date(Date.now() + 3600_000).toISOString() })).status, 409); // not qualified yet
+    const s = await ws.as(4, 'POST', `/api/ws/petitions/${mk.json.petitionId}/sign`); // signing twice is still one signature
+    assert.equal(s.json.signers, 1);
+    const q = await ws.as(5, 'POST', `/api/ws/petitions/${mk.json.petitionId}/sign`);
+    assert.deepEqual([q.json.status, q.json.signers], ['qualified', 2]);
+    assert.ok(q.json.openBy);
+    const vote = await openVote(ws, 1, { petitionId: mk.json.petitionId, title: 'A different title the committee would prefer', type: 'general', options: ['Maybe', 'Never'] });
+    assert.deepEqual([vote.title, vote.options], ['Vote on Saturday shifts', ['Yes', 'No']]); // the committee cannot reword it
+    assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions[0].status, 'opened');
+  });
+});
+
+describe('workspace: officer elections (when the feature flag is on)', () => {
+  let h, ws;
+  before(async () => { h = await startApp({ onlineOfficerElections: true }); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('candidates cannot sit on the committee that runs their election; the winner receives the role', async () => {
+    const ring = (await ws.as(0, 'GET', '/api/ws/keyring?role=election_committee')).json.holders;
+    const vk = await C.newVoteKeys(ring, 2);
+    const base = { title: 'Elect a steward', type: 'officer_election', options: ['Enzo', 'Marco'], closesAt: new Date(Date.now() + 3600_000).toISOString(), votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: 2 };
+    const conflict = await ws.as(0, 'POST', '/api/ws/votes', { ...base, effect: { kind: 'role_grant', role: 'steward', memberIds: [ws.members[1].id, ws.members[5].id] } });
+    assert.equal(conflict.json.error, 'committee_conflict'); // Enzo is on the committee
+    const { res } = await runVote(ws, { title: 'Elect a steward', type: 'officer_election', options: ['Mona', 'Marco'], effect: { kind: 'role_grant', role: 'steward', memberIds: [ws.members[4].id, ws.members[5].id] } }, [0, 1, 4], [5]);
+    assert.equal(res.status, 200);
+    assert.equal(res.json.results.winner, 0);
+    assert.equal(res.json.effectApplied, 'role_grant');
+    assert.ok((await ws.as(4, 'GET', '/api/ws/me')).json.roles.includes('steward'));
+  });
+});
+
+describe('workspace: money you can audit', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('receipts, spending with approvals, and the rule that nobody approves their own request', async () => {
+    const rc = await ws.as(0, 'POST', '/api/ws/ledger/receipt', { amountCents: 100_000, category: 'dues', payer: 'Zyxwvut Payer', memo: 'Zyxwvut memo: September dues' });
+    assert.equal(rc.status, 200, JSON.stringify(rc.json));
+    assert.equal((await ws.as(1, 'POST', '/api/ws/ledger/receipt', { amountCents: 5, category: 'dues' })).status, 403); // officers do not hold the books
+    const small = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 3000, category: 'office', payee: 'Zyxwvut Payee Copy Shop', memo: 'Flyers' })).json;
+    assert.equal(small.requiredApprovals, 1);
+    assert.equal((await ws.as(0, 'POST', `/api/ws/disbursements/${small.id}/approve`, {})).json.error, 'own_request');
+    assert.equal((await ws.as(4, 'POST', `/api/ws/disbursements/${small.id}/approve`, {})).status, 403);
+    assert.equal((await ws.as(0, 'POST', `/api/ws/disbursements/${small.id}/pay`)).json.error, 'not_approved');
+    assert.equal((await ws.as(1, 'POST', `/api/ws/disbursements/${small.id}/approve`, {})).json.status, 'approved');
+    assert.equal((await ws.as(0, 'POST', `/api/ws/disbursements/${small.id}/pay`)).status, 200);
+    const big = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 60_000, category: 'professional', payee: 'Zyxwvut Payee Law Office', memo: 'Retainer' })).json;
+    assert.equal(big.requiredApprovals, 2); // over the threshold: two different officers
+    assert.equal((await ws.as(1, 'POST', `/api/ws/disbursements/${big.id}/approve`, {})).json.status, 'pending');
+    assert.equal((await ws.as(1, 'POST', `/api/ws/disbursements/${big.id}/approve`, {})).status, 409); // the same officer twice is not two officers
+    assert.equal((await ws.as(2, 'POST', `/api/ws/disbursements/${big.id}/approve`, {})).json.status, 'approved');
+    assert.equal((await ws.as(0, 'POST', `/api/ws/disbursements/${big.id}/pay`)).status, 200);
+    const rej = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 100, category: 'office', payee: 'X' })).json;
+    assert.equal((await ws.as(2, 'POST', `/api/ws/disbursements/${rej.id}/approve`, { decision: 'reject' })).json.status, 'rejected');
+    const aid = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 2500, category: 'member_benefits', payee: 'Zyxwvut Payee Hardship', memo: 'Rent help' })).json;
+    await ws.as(1, 'POST', `/api/ws/disbursements/${aid.id}/approve`, {});
+    await ws.as(0, 'POST', `/api/ws/disbursements/${aid.id}/pay`);
+    const sum = (await ws.as(4, 'GET', '/api/ws/finance/summary')).json;
+    assert.equal(sum.balanceCents, 100_000 - 3000 - 60_000 - 2500);
+    assert.equal(sum.entries.find((e) => e.category === 'member_benefits').payee, 'Member'); // aid recipients stay private
+    assert.ok(sum.entries.some((e) => e.payee === 'Zyxwvut Payee Copy Shop'));
+  });
+
+  it('the ledger cannot be edited, even directly in the database; mistakes are fixed with reversing entries', async () => {
+    assert.throws(() => h.app.db.prepare('UPDATE ws_ledger SET amount_cents=1').run(), /immutable/);
+    assert.throws(() => h.app.db.prepare('DELETE FROM ws_ledger').run(), /immutable/);
+    assert.throws(() => h.app.db.prepare('UPDATE ws_audit SET action=?').run('x'), /append-only/);
+    const rows = (await ws.as(4, 'GET', '/api/ws/finance/summary')).json.entries;
+    const receipt = rows.find((e) => e.kind === 'receipt');
+    const rev = await ws.as(0, 'POST', `/api/ws/ledger/${h.app.db.prepare('SELECT id FROM ws_ledger WHERE seq=?').get(receipt.seq).id}/reverse`, { reason: 'Entered twice' });
+    assert.equal(rev.status, 200, JSON.stringify(rev.json));
+    const id = h.app.db.prepare('SELECT id FROM ws_ledger WHERE seq=?').get(receipt.seq).id;
+    assert.equal((await ws.as(0, 'POST', `/api/ws/ledger/${id}/reverse`, { reason: 'again' })).status, 409); // already reversed
+    assert.equal((await ws.as(0, 'POST', `/api/ws/ledger/${h.app.db.prepare('SELECT id FROM ws_ledger WHERE seq=?').get(rev.json.seq).id}/reverse`, { reason: 'undo undo' })).json.error, 'is_reversal');
+    const sum = (await ws.as(4, 'GET', '/api/ws/finance/summary')).json;
+    assert.equal(sum.balanceCents, -3000 - 60_000 - 2500); // the receipt is cancelled out, not erased
+    assert.equal(sum.byCategory.receipts.dues, 0);
+    assert.ok(sum.entries.find((e) => e.seq === receipt.seq).reversed);
+  });
+
+  it('every member can verify the whole ledger is an unbroken chain, and rewritten history is caught', async () => {
+    const chain = (await ws.as(4, 'GET', '/api/ws/finance/chain')).json;
+    assert.ok(chain.entries.length >= 5);
+    const ok = verifyChain(chain.entries, ledgerFields);
+    assert.equal(ok.ok, true);
+    const pin = ok.head;
+    // a corrupt database: someone edits an amount and recomputes nothing
+    const edited = structuredClone(chain.entries); edited[2].cents += 1;
+    assert.deepEqual(verifyChain(edited, ledgerFields), { ok: false, brokenAt: edited[2].seq, why: 'hash' });
+    // cleverer: recompute the edited entry's own hash, but then the next link breaks
+    const forged = structuredClone(chain.entries); forged[2].cents += 1;
+    forged[2].hash = C.chainHash(forged[2].prevHash, ledgerFields(forged[2]));
+    assert.equal(verifyChain(forged, ledgerFields).why, 'link');
+    // cleverest: rewrite the whole tail consistently. The head this device pinned earlier gives it away.
+    const rewritten = structuredClone(chain.entries); rewritten[2].cents += 1;
+    for (let i = 2; i < rewritten.length; i++) { if (i > 2) rewritten[i].prevHash = rewritten[i - 1].hash; rewritten[i].hash = C.chainHash(rewritten[i].prevHash, ledgerFields(rewritten[i])); }
+    assert.equal(verifyChain(rewritten, ledgerFields).ok, true);
+    assert.deepEqual(checkPinned(rewritten, pin), { ok: false, why: 'changed' });
+    assert.deepEqual(checkPinned(chain.entries, pin), { ok: true });
+    assert.equal(checkPinned(chain.entries.slice(0, 2), pin).why, 'missing');
+    const audit = (await ws.as(0, 'GET', '/api/ws/audit')).json;
+    assert.equal(verifyChain([...audit.entries].reverse(), auditFields, { anchored: audit.entries.length < 500 }).ok, true);
+  });
+
+  it('plaintext-leak test: payees, memos and people are encrypted at rest', () => {
+    assert.deepEqual(h.leaks([...NEEDLES, 'Zyxwvut Payee Copy Shop', 'Zyxwvut Payee Law Office', 'Zyxwvut Payee Hardship', 'Flyers', 'Retainer', 'Rent help', 'Entered twice']), []);
+  });
+});
+
+describe('workspace: grievances (end-to-end encrypted, never gated by dues)', () => {
+  let h, ws, id, key;
+  const CHIEF = 0, STEW = 7, WORKER = 6, OTHER = 4;
+  const sealTo = (i, k) => C.boxSeal(ws.members[i].keys.boxPublicKey, k);
+  const openKey = (i, sealed) => C.boxOpen(sealed, ws.members[i].keys.boxPublicKey, ws.members[i].keys.boxSecretKey);
+  const today = async () => (await ws.as(CHIEF, 'GET', '/api/ws/me')).json.today;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('is unavailable before recognition, and refuses to accept a concern nobody could read', async () => {
+    const t = await makeWorkspace(h, [person('Only Officer', 0, { roles: ['officer'] }), person('Worker One', 1)], { stage: 'public_prerecognition' });
+    const gid = crypto.randomUUID(), k = C.randomBytes(32);
+    const body = { id: gid, ...C.sealJson(k, { what: 'x' }, 'grievance|' + gid), sealedKeys: { [t.members[1].id]: C.boxSeal(t.members[1].keys.boxPublicKey, k) } };
+    assert.equal((await t.as(1, 'POST', '/api/ws/grievances', body)).json.error, 'stage_required');
+    assert.equal((await t.as(0, 'POST', '/api/ws/stage', { stage: 'recognized', note: 'NLRB certification' })).status, 200);
+    assert.equal((await t.as(1, 'POST', '/api/ws/grievances', body)).json.error, 'no_chief_steward');
+  });
+
+  it('a non-member files a concern; only the chief steward and the worker can read it', async () => {
+    id = crypto.randomUUID(); key = C.randomBytes(32);
+    const box = C.sealJson(key, { what: 'Zyxwvut grievance narrative: my hours were cut after I signed', who: 'Shift manager', desired: 'Restore my hours' }, 'grievance|' + id);
+    const keys = { [ws.members[WORKER].id]: sealTo(WORKER, key), [ws.members[CHIEF].id]: sealTo(CHIEF, key) };
+    assert.equal((await ws.as(WORKER, 'POST', '/api/ws/grievances', { id, ...box, sealedKeys: { [ws.members[WORKER].id]: keys[ws.members[WORKER].id] } })).status, 400); // the chief steward's key is required
+    const r = await ws.as(WORKER, 'POST', '/api/ws/grievances', { id, ...box, articleRef: 'Art. 12', sealedKeys: keys });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    const g = (await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.deepEqual([g.mine, g.canWork, g.steps.length], [true, false, 3]);
+    assert.equal(g.dueOn, D.dueDate(g.filedOn, { days: 5, dayType: 'business' }, [])); // step 1: 5 business days
+    assert.equal(C.openJson(openKey(WORKER, g.sealedKey), g.content, 'grievance|' + id).desired, 'Restore my hours');
+    const c = (await ws.as(CHIEF, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.match(C.openJson(openKey(CHIEF, c.sealedKey), c.content, 'grievance|' + id).what, /hours were cut/);
+    for (const i of [STEW, OTHER, 1]) assert.equal((await ws.as(i, 'GET', `/api/ws/grievances/${id}`)).status, 404); // nobody else can even tell it exists
+    assert.equal((await ws.as(STEW, 'GET', '/api/ws/grievances')).json.grievances.length, 0);
+    assert.equal((await ws.as(CHIEF, 'GET', '/api/ws/grievances')).json.grievances.length, 1);
+    const log = (await ws.as(WORKER, 'GET', '/api/ws/me/access-log')).json.entries;
+    assert.ok(log.some((e) => e.action === 'grievance.opened' && e.actor.startsWith('Ofelia'))); // the worker can see who opened their case
+  });
+
+  it('the chief steward assigns a steward by re-sealing the case key to them', async () => {
+    const ring = (await ws.as(CHIEF, 'GET', '/api/ws/keyring?role=steward')).json.holders;
+    const sam = ring.find((x) => x.memberId === ws.members[STEW].id);
+    assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/assign`, { stewardId: sam.memberId, sealedKey: C.boxSeal(sam.boxPublicKey, key) })).status, 403); // stewards cannot assign
+    assert.equal((await ws.as(CHIEF, 'POST', `/api/ws/grievances/${id}/assign`, { stewardId: ws.members[OTHER].id, sealedKey: C.boxSeal(sam.boxPublicKey, key) })).json.error, 'steward_not_found');
+    const g0 = (await ws.as(CHIEF, 'GET', `/api/ws/grievances/${id}`)).json;
+    const resealed = C.boxSeal(sam.boxPublicKey, openKey(CHIEF, g0.sealedKey)); // only someone holding the key can hand it on
+    assert.equal((await ws.as(CHIEF, 'POST', `/api/ws/grievances/${id}/assign`, { stewardId: sam.memberId, sealedKey: resealed })).status, 200);
+    const g = (await ws.as(STEW, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.equal(g.canWork, true);
+    assert.equal(C.openJson(openKey(STEW, g.sealedKey), g.content, 'grievance|' + id).who, 'Shift manager');
+    const note = C.sealJson(key, { note: 'Zyxwvut note: met with the manager' }, 'note|' + id);
+    assert.equal((await ws.as(OTHER, 'POST', `/api/ws/grievances/${id}/notes`, note)).status, 403);
+    assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/notes`, note)).status, 200);
+    const seen = (await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json.notes[0];
+    assert.match(C.openJson(key, seen, 'note|' + id).note, /met with the manager/);
+  });
+
+  it('steps start their own clocks, and overdue steps show up for the union', async () => {
+    const t0 = await today();
+    assert.equal((await ws.as(WORKER, 'POST', `/api/ws/grievances/${id}/steps/complete`, { outcome: 'advance' })).status, 403);
+    assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/steps/complete`, { outcome: 'advance' })).status, 200);
+    const g = (await ws.as(STEW, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.deepEqual([g.currentStep, g.steps[0].outcome], [2, 'advance']);
+    assert.equal(g.steps[1].dueOn, D.dueDate(t0, { days: 10, dayType: 'business' }, [])); // step 2's clock started today
+    h.app.db.prepare('UPDATE ws_grievance_steps SET due_on=? WHERE grievance_id=? AND step_number=2').run('2020-01-01', id);
+    assert.equal((await ws.as(CHIEF, 'GET', '/api/ws/grievances')).json.grievances[0].urgency.level, 'overdue');
+    assert.equal((await ws.as(CHIEF, 'GET', '/api/ws/health')).json.overdueSteps, 1);
+  });
+
+  it('a case cannot close without a recorded decision, a reason and telling the worker', async () => {
+    const closeIt = () => ws.as(STEW, 'POST', `/api/ws/grievances/${id}/close`);
+    assert.deepEqual((await closeIt()).json, { error: 'cannot_close', missing: ['decision', 'reason', 'worker_notification'] });
+    assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/decision`, { decision: 'pursue' })).status, 400); // a decision needs a reason
+    assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/decision`, { decision: 'whatever', ...C.sealJson(key, { r: 'x' }, 'reason|' + id), reasonCiphertext: 'AAAAAAAAAAAAAAAAAAAA', reasonNonce: 'A'.repeat(32) })).status, 400);
+    const reason = C.sealJson(key, { reason: 'Zyxwvut reason: the contract clearly covers this' }, 'reason|' + id);
+    assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/decision`, { decision: 'pursue', reasonCiphertext: reason.ciphertext, reasonNonce: reason.nonce })).status, 200);
+    assert.deepEqual((await closeIt()).json.missing, ['worker_notification']);
+    assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/notify-worker`)).status, 200);
+    assert.equal((await closeIt()).status, 200);
+    assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/steps/complete`, { outcome: 'advance' })).json.error, 'closed');
+    const g = (await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json; // the worker reads the decision and the reason
+    assert.deepEqual([g.decision, g.workerNotified, g.status], ['pursue', true, 'closed']);
+    assert.match(C.openJson(key, { nonce: g.reason.nonce, ciphertext: g.reason.ciphertext }, 'reason|' + id).reason, /contract clearly covers/);
+  });
+
+  it('the union configures its own grievance procedure, including holidays', async () => {
+    assert.equal((await ws.as(OTHER, 'PUT', '/api/ws/procedure', { steps: [{ name: 'S', days: 3, dayType: 'calendar' }] })).status, 403);
+    assert.equal((await ws.as(0, 'PUT', '/api/ws/procedure', { steps: [{ name: 'S', days: 0, dayType: 'calendar' }] })).status, 400);
+    const t0 = await today();
+    const hol = D.addCalendar(t0, 3);
+    assert.equal((await ws.as(0, 'PUT', '/api/ws/procedure', { steps: [{ name: 'Only step', days: 3, dayType: 'business' }], holidays: [hol] })).status, 200);
+    const gid = crypto.randomUUID(), k = C.randomBytes(32);
+    const r = await ws.as(OTHER, 'POST', '/api/ws/grievances', { id: gid, ...C.sealJson(k, { what: 'Zyxwvut second concern' }, 'grievance|' + gid), sealedKeys: { [ws.members[OTHER].id]: sealTo(OTHER, k), [ws.members[CHIEF].id]: C.boxSeal(ws.members[CHIEF].keys.boxPublicKey, k) } });
+    assert.equal(r.status, 200);
+    const g = (await ws.as(OTHER, 'GET', `/api/ws/grievances/${gid}`)).json;
+    assert.equal(g.steps.length, 1);
+    assert.equal(g.steps[0].dueOn, D.dueDate(t0, { days: 3, dayType: 'business' }, [hol]));
+  });
+
+  it('union health shows aggregates only and hides small groups', async () => {
+    const hl = (await ws.as(0, 'GET', '/api/ws/health')).json;
+    assert.deepEqual([hl.unitSize, hl.members], [8, 7]);
+    assert.deepEqual(hl.shifts.find((x) => x.shift === 'Day'), { shift: 'Day', total: 6, members: 6 });
+    assert.deepEqual(hl.shifts.find((x) => x.shift === 'Night'), { shift: 'Night', suppressed: true }); // 2 people: hidden
+    assert.equal((await ws.as(4, 'GET', '/api/ws/health')).status, 403);
+    const cal = (await ws.as(0, 'GET', '/api/ws/compliance')).json.tasks;
+    assert.ok(cal.find((t) => t.key === 'lm1').dueOn);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/compliance/lm1/toggle')).json.done, true);
+  });
+
+  it('plaintext-leak test: grievance content, decisions and notes never reach the server in any readable form', async () => {
+    const tokens = ws.members.map((m) => m.token);
+    const ex = JSON.stringify((await ws.as(CHIEF, 'GET', '/api/ws/export')).json);
+    assert.ok(!ex.includes('my hours were cut') && !ex.includes('contract clearly covers')); // E2E content is exported as ciphertext only
+    assert.deepEqual(h.leaks([...NEEDLES, 'my hours were cut', 'Restore my hours', 'Shift manager', 'met with the manager', 'contract clearly covers', 'second concern', ...tokens, C.b64(key)]), []);
+  });
+});

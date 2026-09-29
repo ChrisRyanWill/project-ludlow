@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0b1a4a">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<title>Project Ludlow: a union nobody can silence, and nobody has to trust</title>
+<meta name="description" content="Open-source tools for workers to form a union privately with encrypted authorization cards, then run it democratically with secret ballots, open books and fair case handling that every member can verify.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Project Ludlow">
+<meta property="og:description" content="A union nobody can silence, and nobody has to trust. Open source, worker-first, built to be checked.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%230b1a4a'/%3E%3Crect x='4' y='4' width='24' height='24' rx='3' fill='%23f0b323'/%3E%3Cpath d='M11 8v13h9' fill='none' stroke='%230b1a4a' stroke-width='3.5'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#top"><span class="mark" aria-hidden="true">L</span><span>Project Ludlow</span></a>
+    <nav aria-label="Main">
+      <a href="#try">Try the lock</a>
+      <a href="#screens">Screens</a>
+      <a href="#join">Join in</a>
+      <a class="btn gold small" href="https://github.com/ChrisRyanWill/project-ludlow" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="status" role="note">
+  <div class="wrap"><strong>Early prototype.</strong> Not yet security-audited or legally reviewed, so please don't use it for real organizing yet. <a href="#join">Help us get it there.</a></div>
+</div>
+
+<main id="main">
+  <section class="hero" id="top">
+    <div class="wrap">
+      <p class="eyebrow">Open source · worker-first · built to be checked</p>
+      <h1>A union nobody can silence, and nobody has to trust.</h1>
+      <p class="lead">Project Ludlow lets coworkers sign union authorization cards that even the server can't read, then run their union with secret ballots, open books and fair case handling that <em>every member can verify for themselves</em>.</p>
+      <div class="cta">
+        <a class="btn gold" href="https://github.com/ChrisRyanWill/project-ludlow" rel="noopener">View the code on GitHub</a>
+        <a class="btn ghost" href="#try">Try the lock, right here</a>
+        <a class="btn ghost" href="https://github.com/ChrisRyanWill/project-ludlow/blob/main/docs/THREAT_MODEL.md" rel="noopener">Read the threat model</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap halves" aria-labelledby="halves-h">
+    <h2 id="halves-h" class="sr">Two halves</h2>
+    <article class="card">
+      <p class="tag">1 · Organize</p>
+      <h3>Sign cards nobody can read</h3>
+      <p>Coworkers sign electronic authorization cards on their own phones. Each card is encrypted <em>in the browser</em> with a key split among a few trusted trustees. One person can start alone and add the committee later. When the committee decides to go public, the browser builds the filing package locally: roster, cards, declaration and draft letters. Nothing is filed or sent for you.</p>
+    </article>
+    <article class="card">
+      <p class="tag">2 · Run</p>
+      <h3>Run it in the open</h3>
+      <p>A workspace with secret-ballot votes, workplace cases with real deadlines, a ledger every member can audit, bylaws that carry out members' decisions by themselves, and petitions that let members force a vote or a recall.</p>
+    </article>
+  </section>
+
+  <section class="band" aria-labelledby="promises-h">
+    <div class="wrap">
+      <h2 id="promises-h">Built so you don't have to trust us</h2>
+      <ol class="promises">
+        <li><h3>Nobody can read a card early</h3><p>Cards are encrypted on the signer's phone. The server only ever holds ciphertext, and any tampering is detected.</p></li>
+        <li><h3>A lock that is enforced</h3><p>Set a release number when the campaign starts. The server refuses to hand over the sealed cards until that many people have signed and been confirmed. Lowering the number takes several trustees.</p></li>
+        <li><h3>Start with one person</h3><p>Organizing begins with a conversation, not a committee. Go live the moment you have a key, then lock your early cards to the full committee when it exists.</p></li>
+        <li><h3>Votes you can recount</h3><p>Ballots have no link to voters. After the vote, any member's browser can recount them and check its own receipt.</p></li>
+        <li><h3>Books that can't be quietly edited</h3><p>The ledger and audit log are hash chains that every member's browser verifies. Big spending needs two different officers.</p></li>
+        <li><h3>Software you can check</h3><p>No trackers or third-party code, a strict content policy, and reproducible builds, so anyone can compare the served code with the source.</p></li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="wrap try" id="try" aria-labelledby="try-h">
+    <h2 id="try-h">Try the lock</h2>
+    <p>This runs <strong>the same cryptography as the app</strong>, on your device. Seal a (fake) card among five trustees, then see what it takes to open it. Nothing you type leaves this page.</p>
+    <div class="card" id="try-root">
+      <p class="muted">The demo loads about 200 KB of cryptography, only when you ask.</p>
+      <button class="btn primary" id="try-load" type="button">Start the demo</button>
+    </div>
+  </section>
+
+  <section class="band" id="screens" aria-labelledby="screens-h">
+    <div class="wrap">
+      <h2 id="screens-h">Made for phones, in the light or the dark</h2>
+      <p class="muted">Real screens from the running app: no mock-ups.</p>
+      <div class="gallery">
+        <figure class="phone"><div class="frame"><img src="img/home.png" width="375" alt="The home page: a navy banner reading Start a union at your workplace, safely, with a gold Start a campaign button" loading="lazy"></div><figcaption>Start a campaign</figcaption></figure>
+        <figure class="phone"><div class="frame"><img src="img/card.png" width="375" alt="An authorization card with a double rule, the union's name, the card text and a typed signature" loading="lazy"></div><figcaption>The card a coworker signs</figcaption></figure>
+        <figure class="phone"><div class="frame"><img src="img/progress.png" width="375" alt="A progress bar with markers at 30, 50 and 70 percent and a gold marker showing where the lock opens" loading="lazy"></div><figcaption>Progress, and where the lock opens</figcaption></figure>
+        <figure class="phone"><div class="frame"><img src="img/committee.png" width="375" alt="The trustee dashboard showing the committee, invitation links and the lock" loading="lazy"></div><figcaption>Start alone, add the committee</figcaption></figure>
+        <figure class="phone"><div class="frame"><img src="img/vote-dark.png" width="375" alt="Results of a secret-ballot vote in dark mode, with a button to recount every ballot in the browser" loading="lazy"></div><figcaption>A vote any member can recount</figcaption></figure>
+        <figure class="phone"><div class="frame"><img src="img/money-dark.png" width="375" alt="The money page in dark mode, showing the ledger checked in the browser as an unbroken chain" loading="lazy"></div><figcaption>Books checked in your browser</figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap anywhere" aria-labelledby="any-h">
+    <h2 id="any-h">Built for anywhere, and for hard situations</h2>
+    <div class="grid3">
+      <article class="card"><h3>The law lives in data</h3><p>Thresholds, card wording and document templates are jurisdiction packs, not code. The US (NLRA) and UK (CAC) are in, plus a general pack. Adding a country is adding files.</p></article>
+      <article class="card"><h3>Any language</h3><p>English and Spanish today. A language is one file, and right-to-left scripts are supported. Every legal text is marked as a draft for a qualified reviewer.</p></article>
+      <article class="card"><h3>Made for risk</h3><p>A quick-exit button, QR invites that leave no message trail, a private record of employer conduct with a filing-deadline clock, neutral tab titles, and no tracking of any kind.</p></article>
+    </div>
+  </section>
+
+  <section class="band warnband" aria-labelledby="limits-h">
+    <div class="wrap">
+      <h2 id="limits-h">Honest limits</h2>
+      <ul class="limits">
+        <li><strong>It is unaudited.</strong> Nobody independent has reviewed the cryptography or the code yet. That is the first thing we need.</li>
+        <li><strong>The legal text is draft.</strong> Every document carries a warning and open <code>TODO(lawyer)</code> questions. Nothing here is legal advice, and nothing is ever filed or sent for you.</li>
+        <li><strong>The release lock is enforced by the server, not by mathematics.</strong> It stops trustees, but not someone who can read the database, so host it where no trustee controls it.</li>
+        <li><strong>A founder who starts alone can open early cards alone</strong> until the committee is complete. The app says so plainly.</li>
+        <li><strong>Much of it was written with AI assistance</strong> (Claude Code) from written specs, which is exactly why it needs human reviewers.</li>
+      </ul>
+      <p><a href="https://github.com/ChrisRyanWill/project-ludlow/blob/main/docs/THREAT_MODEL.md" rel="noopener">The full threat model, with everything it does and doesn't protect against &rarr;</a></p>
+    </div>
+  </section>
+
+  <section class="wrap join" id="join" aria-labelledby="join-h">
+    <h2 id="join-h">Join in</h2>
+    <p class="lead">This only works if people who care look at it closely. Whatever you know, there is a place for it.</p>
+    <div class="grid3">
+      <article class="card"><h3>Developers</h3><p>Small, well-tested Node and vanilla JS. Start with a <a href="https://github.com/ChrisRyanWill/project-ludlow/labels/good%20first%20issue" rel="noopener">good first issue</a>.</p></article>
+      <article class="card"><h3>Security &amp; cryptography</h3><p>Review the protocols, break the assumptions, and <a href="https://github.com/ChrisRyanWill/project-ludlow/blob/main/SECURITY.md" rel="noopener">report privately</a>.</p></article>
+      <article class="card"><h3>Attorneys &amp; organizers</h3><p>Every file in <code>content/legal</code> is waiting for someone qualified. Real experience beats guesses.</p></article>
+      <article class="card"><h3>Translators</h3><p>Add a language, or check the Spanish, in one file. A bilingual reader should check the card text.</p></article>
+      <article class="card"><h3>Designers &amp; accessibility</h3><p>Screen readers, contrast, low-end phones, right-to-left layouts.</p></article>
+      <article class="card"><h3>Everyone else</h3><p>Tell us what would break in real life in <a href="https://github.com/ChrisRyanWill/project-ludlow/discussions" rel="noopener">Discussions</a>. Please never share real names or workplaces.</p></article>
+    </div>
+    <div class="cta center">
+      <a class="btn primary" href="https://github.com/ChrisRyanWill/project-ludlow/blob/main/CONTRIBUTING.md" rel="noopener">Contributing guide</a>
+      <a class="btn secondary" href="https://github.com/ChrisRyanWill/project-ludlow/issues" rel="noopener">Open issues</a>
+      <a class="btn secondary" href="https://github.com/ChrisRyanWill/project-ludlow/discussions" rel="noopener">Discussions</a>
+    </div>
+    <h3>Run it yourself in two minutes</h3>
+<pre class="code"><code>git clone https://github.com/ChrisRyanWill/project-ludlow.git
+cd project-ludlow
+npm install
+npm start        # http://localhost:8787
+npm test         # unit, API and real-browser tests</code></pre>
+    <p class="muted">Node 20 or newer. One SQLite file for data, and a Dockerfile if you prefer.</p>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p>Project Ludlow is a tool. It is not a union and not a law firm, and nothing here is legal advice.</p>
+    <p class="small">Open source: see the <a href="https://github.com/ChrisRyanWill/project-ludlow/blob/main/LICENSE" rel="noopener">LICENSE</a> in the repository. This page loads nothing from anywhere else and tracks no one.</p>
+  </div>
+</footer>
+<script src="site.js" defer></script>
+</body>
+</html>
