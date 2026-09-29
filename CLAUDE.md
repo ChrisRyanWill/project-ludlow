@@ -17,6 +17,8 @@ Project Ludlow lets workers form a union with zero-knowledge authorization cards
 9a. **The release number is enforced by the server.** `export-bundle` is the only route that may return card ciphertext, and it must check `release_min` first. Never add another route that returns ciphertext, and never let one trustee lower the number alone.
 9b. **Cards are sealed 'solo' to the founder only while the committee is incomplete.** Never accept a solo card once every trustee has joined, and never let anyone but trustee 1 reshare.
 
+9c. **Browsers seal only to keys they can authenticate.** Everything sealed for the trustees (a signer's card, a member's report, the founder's re-lock) goes through `shared/roster.js`: the founder's key check from the invitation link, and the roster the founder signed. Never seal to the trustee list the server returns, and never build an invitation link without the founder's key check (`f`). A unit test fails if either happens. See `docs/PROTOCOL.md` section 1a.
+
 ### Cryptography
 9. Only `libsodium-wrappers-sumo` and `shamir-secret-sharing`, all in `shared/crypto.js`. Never write primitives. Never use `Math.random()` for anything security related.
 10. Every crypto function has tests, including negative ones (wrong key, k-1 shares, tampering).
