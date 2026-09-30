@@ -4,3 +4,7 @@ web/dist/
 *.log
 .env
 site-dist/
+*.db
+*.db-journal
+*.sqlite
+*.key

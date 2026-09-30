@@ -24,10 +24,10 @@ export function HomePage() {
     div({ class: 'card' },
       h2(t('Built so you do not have to trust us')),
       ul(
-        li(t('Cards are encrypted in the browser, and this website holds no key that opens them. It sees a signer\'s details only once, to send the confirmation email the law requires, and then discards them.')),
+        li(t('Cards are encrypted in the browser, and this website holds no key that opens them. It sees a signer\'s details only once, to send the confirmation email US labor board guidance calls for, and then discards them.')),
         li(t('Votes are secret. When the committee publishes the ballot key (always, for decisions the system carries out), every member can recount the ballots themselves.')),
         li(t('The union\'s books are a chain that cannot be quietly edited. Your browser checks it.')),
-        li(t('Spending needs two officers. Members can force a vote or a recall by petition.')),
+        li(t('Large spending needs two officers to approve. Members can force a vote or a recall by petition.')),
         li(t('You can run your own copy of the server and export everything at any time.')))),
     callout('info', strong(t('This is a tool.')), ' ', t('It is not a union and not a law firm. It never files anything or contacts your employer for you. Everything it produces is a draft for people to review.'))));
 }

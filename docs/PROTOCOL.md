@@ -76,19 +76,19 @@ sequenceDiagram
     participant F as Founder (trustee 1) browser
     participant S as Server
     participant T as Trustee i browser
-    F->>S: POST /api/campaigns (k, n, release number, encrypted meta; campaignKey stays in the browser)
+    F->>S: POST /api/campaigns (k, n, release number, encrypted meta, campaignKey stays in the browser)
     F->>F: open own link: make box + sign keys, f = founderCommit(keys)
     F->>S: POST /api/trustees/enroll (seat 1 public keys)
     Note over F,S: Cards are sealed to the founder alone ("solo") until the roster is stored
     F-->>T: trustee link from the dashboard /t#...&f=... (in person or a private channel)
     T->>S: GET /api/campaigns/:id/meta
     T->>T: founderCommit(seat 1 keys from S) == f ? else refuse
-    T->>T: make own keys; key file (Argon2id) keeps f
+    T->>T: make own keys, key file (Argon2id) keeps f
     T->>S: POST /api/trustees/enroll (public keys)
     F->>T: read key words aloud, in person, for every seat
     F->>F: rosterToSign(meta): {campaignId, k, n, seats}
     F->>S: POST /api/campaigns/:id/roster (signature by founder's sign key)
-    S->>S: must equal its own committee, verify signature, store; now only k-of-n cards
+    S->>S: must equal its own committee, verify signature, store, now only k-of-n cards
     F->>S: GET /api/campaigns/:id/reshare-bundle (sealed keys, no ciphertext)
     F->>F: open each solo key, split k-of-n to the signed seats, check k rebuild it
     F->>S: POST /api/campaigns/:id/reshare
@@ -101,17 +101,19 @@ sequenceDiagram
     autonumber
     participant W as Signer browser
     participant S as Server
-    W->>S: POST /api/invites/resolve (token hash from the link)
+    W->>S: POST /api/invites/resolve (the invitation token from the link, stored only as a hash)
     W->>S: GET /api/campaigns/:id/meta (trustees, roster if signed)
-    W->>W: authenticate(meta, f from link): founder only, or the signed seats; else refuse before asking anything
-    W->>W: payload -> aead(cardKey); cardKey -> solo seal, or Shamir k-of-n sealed to each seat
+    W->>W: authenticate(meta, f from link): founder only, or the signed seats, else refuse before asking anything
+    W->>W: payload -> aead(cardKey), cardKey -> solo seal, or Shamir k-of-n sealed to each seat
     W->>S: POST /api/cards {ciphertext, nonce, sealed shares or solo key}
     alt the roster changed while the person was typing
         S-->>W: 409 committee_changed
         W->>S: GET /api/campaigns/:id/meta
         W->>W: authenticate again, re-seal, resend
     end
-    S-->>W: stored (ciphertext only); confirmation email sent and the details discarded
+    S-->>W: stored (ciphertext only)
+    W->>S: POST /api/cards/:id/confirm (the signer's details, the one plaintext step)
+    S-->>W: confirmation email sent, the details discarded (only the send time and message id are kept)
 ```
 
 ### 5.3 Opening the cards
@@ -127,7 +129,7 @@ sequenceDiagram
     else enough
         S-->>K: ciphertexts + sealed shares
         K->>K: each trustee unlocks their key file and opens their shares
-        K->>K: shamir.combine (k shares) -> cardKey -> decrypt; filing package built in the browser
+        K->>K: shamir.combine (k shares) -> cardKey -> decrypt, filing package built in the browser
     end
 ```
 
@@ -140,17 +142,17 @@ sequenceDiagram
     participant S as Server
     participant V as Voter browser
     participant C as k committee members, one browser
-    O->>O: vote keypair; split secret key k-of-m; seal shares to committee box keys; wipe
+    O->>O: vote keypair, split secret key k-of-m, seal shares to committee box keys, wipe
     O->>S: POST /api/ws/votes (public key, sealed shares)
-    V->>V: seal([option] + 31 random bytes) to the vote key; receipt code
+    V->>V: seal([option] + 31 random bytes) to the vote key, receipt code
     V->>S: POST /api/ws/votes/:id/ballot {ciphertext, H(receipt)}
-    S->>S: one transaction: mark voted; store ballot and receipt apart, no voter, no time; rewrite rows in random order
+    S->>S: one transaction: mark voted, store ballot and receipt apart, no voter, no time, rewrite rows in random order
     C->>S: GET /api/ws/votes/:id/tally-bundle (after it closes)
     C->>C: open shares, combine, decrypt, count
     alt key published (required for decisions with an effect)
         C->>S: POST /api/ws/votes/:id/results {secretKey, counts}
-        S->>S: recount; refuse a wrong tally; apply the effect
-        V->>S: GET /api/ws/votes/:id/ballots and /receipts; recount and find own receipt
+        S->>S: recount, refuse a wrong tally, apply the effect
+        V->>S: GET /api/ws/votes/:id/ballots and /receipts, recount and find own receipt
     else key kept
         C->>S: POST /api/ws/votes/:id/results {counts, k signatures by committee members}
     end

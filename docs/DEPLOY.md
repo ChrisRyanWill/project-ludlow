@@ -15,7 +15,7 @@ Write down who holds what: the server login, the master key and the backups. Kee
 - **A small Linux server** with a public address. One CPU and 1 GB of memory are enough; the database is one SQLite file.
 - **A domain name, with HTTPS in front** of the app. The steps below use Caddy, which obtains certificates by itself. nginx works too.
 - **Docker**, or Node 20 or later if you run it without Docker.
-- **For real confirmation emails:** a Postmark account (server token, a verified sender address) and an inbox someone reads for replies. The confirmation email is how the law expects a signer to get a copy of their card. Without an email provider, `EMAIL_PROVIDER=dev` keeps the messages in memory only, and **nobody receives them**.
+- **For real confirmation emails:** a Postmark account (server token, a verified sender address) and an inbox someone reads for replies. In the US pack, the confirmation email is how a signer gets a copy of their card, as NLRB General Counsel memo GC 15-08 calls for. Without an email provider, `EMAIL_PROVIDER=dev` keeps the messages in memory only, and **nobody receives them**.
 
 ## 3. Generate the master key, and keep it
 
