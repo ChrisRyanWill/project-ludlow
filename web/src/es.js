@@ -797,4 +797,7 @@ export default {
   'If you changed it on another device, type the numbers you chose:': 'Si lo cambiaste en otro dispositivo, escribe los números que elegiste:',
   'Use this plan': 'Usar este plan',
   'Those are not the numbers the website shows. Nothing was changed.': 'Esos no son los números que muestra el sitio web. No se cambió nada.',
+  // a case key that does not open (first draft, needs a native reviewer: #10)
+  'The key you were given for this case does not open it. Remove it, so that the worker or a steward can share a working one with you.': 'La llave que te dieron para este caso no lo abre. Quítala para que el trabajador o un delegado pueda compartirte una que funcione.',
+  'Remove my key': 'Quitar mi llave',
 };

@@ -732,6 +732,21 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     return { shared: true };
   });
 
+  // The server cannot tell a real key from junk. If the key someone was given does not open, they can drop their own entry, which puts them back
+  // among those missing a key so a real one can be shared. Only their own, and never the worker's.
+  W('POST', '/api/ws/grievances/:id/drop-my-key', 'grievance.share', ({ me, params }) => {
+    const g = grievanceFor(me, params.id, 'read');
+    if (g.submitted_by === me.id) fail(409, 'worker_key');
+    const keys = JSON.parse(g.sealed_keys);
+    if (!keys[me.id]) return { dropped: false };
+    delete keys[me.id];
+    db.transaction(() => {
+      db.prepare('UPDATE ws_grievances SET sealed_keys=? WHERE id=?').run(JSON.stringify(keys), g.id);
+      audit(me.wsId, me.id, 'grievance.key_dropped', 'grievance', g.id);
+    })();
+    return { dropped: true };
+  });
+
   W('POST', '/api/ws/grievances/:id/notes', 'grievance.work', ({ me, params, body: b }) => {
     const g = grievanceFor(me, params.id, 'work');
     need(isB64(b.ciphertext, 16, 30000) && isB64(b.nonce, 32, 32));

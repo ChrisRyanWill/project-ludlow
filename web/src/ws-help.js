@@ -73,6 +73,8 @@ export async function CaseDetail({ id }) {
     div({ class: 'row between' }, h1(g.stepName || t('Case')), g.status === 'closed' ? badge(t('Closed'), 'ok') : urgencyBadge(g.urgency)),
     p({ class: 'muted' }, `${t('Filed {d}', { d: fmtDate(g.filedOn) })}${g.articleRef ? ' · ' + g.articleRef : ''} · ${g.assignedTo ? t('Steward: {name}', { name: g.assignedTo.name }) : t('No steward yet')}`),
     content ? div({ class: 'card' }, h2(t('What happened')), p({ class: 'pre' }, content.what), content.when ? p({ class: 'small' }, t('When: {x}', { x: content.when })) : null, content.who ? p({ class: 'small' }, t('Who: {x}', { x: content.who })) : null, content.desired ? p({ class: 'small' }, t('What would fix it: {x}', { x: content.desired })) : null)
+      : g.sealedKey && !g.mine ? callout('danger', t('The key you were given for this case does not open it. Remove it, so that the worker or a steward can share a working one with you.'), ' ',
+        btn(t('Remove my key'), act(async () => { await wcall('POST', `/api/ws/grievances/${id}/drop-my-key`); render(); }), { kind: 'secondary small' }))
       : callout('warn', t('You do not hold the key to read this case. Ask the worker, or a steward who is on the case, to share it with you.')),
     key && g.missingKeys?.length ? div({ class: 'card' }, h3(t('Not everyone who should can read this case')),
       p({ class: 'small muted' }, t('These chief stewards were appointed after the case was filed, so they cannot read or work it until someone who holds the key shares it with them. Sharing seals the key to them alone.')),

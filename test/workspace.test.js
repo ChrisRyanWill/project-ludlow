@@ -873,6 +873,24 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'remove' })).status, 200);
   });
 
+  it('a key that does not open can be dropped by the person it was given to, so a real one can be shared', async () => {
+    const EZRA = 3;
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'add' })).status, 200);
+    const keysNow = () => JSON.parse(h.app.db.prepare('SELECT sealed_keys k FROM ws_grievances WHERE id=?').get(id).k);
+    const had = keysNow()[ws.members[EZRA].id];
+    if (had) { // from the earlier hand-over: start this test from a junk key instead
+      const k = keysNow(); k[ws.members[EZRA].id] = C.boxSeal(ws.members[EZRA].keys.boxPublicKey, C.randomBytes(32)); h.app.db.prepare('UPDATE ws_grievances SET sealed_keys=? WHERE id=?').run(JSON.stringify(k), id);
+    }
+    const drop = (i) => ws.as(i, 'POST', `/api/ws/grievances/${id}/drop-my-key`);
+    assert.equal((await drop(OTHER)).status, 404); // not a party to the case
+    assert.equal((await drop(WORKER)).json.error, 'worker_key'); // the worker's own key is never dropped
+    assert.equal((await drop(EZRA)).status, 200);
+    assert.equal(keysNow()[ws.members[EZRA].id], undefined);
+    assert.ok((await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json.missingKeys.some((m) => m.memberId === ws.members[EZRA].id)); // offered again
+    assert.equal((await ws.as(CHIEF, 'POST', `/api/ws/grievances/${id}/share`, { memberId: ws.members[EZRA].id, sealedKey: C.boxSeal(ws.members[EZRA].keys.boxPublicKey, key) })).json.shared, true);
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'remove' })).status, 200);
+  });
+
   it('steps start their own clocks, and overdue steps show up for the union', async () => {
     const t0 = await today();
     assert.equal((await ws.as(WORKER, 'POST', `/api/ws/grievances/${id}/steps/complete`, { outcome: 'advance' })).status, 403);
