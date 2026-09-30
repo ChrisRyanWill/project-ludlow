@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as C from '../shared/crypto.js';
 import * as D from '../shared/deadlines.js';
-import { verifyChain, ledgerFields, auditFields, checkPinned } from '../shared/verify.js';
+import { verifyChain, ledgerFields, auditFields, checkPinned, checkCommitments } from '../shared/verify.js';
 import { can, ROLES } from '../shared/permissions.js';
 import { startApp, makeWorkspace, login } from './helpers.js';
 import { physicalOrder } from './sqlite-pages.js';
@@ -406,6 +406,30 @@ describe('workspace: an encrypted field belongs to its row', () => {
     assert.match(old, /^v1\./);
     h.app.db.prepare('UPDATE ws_members SET email_enc=? WHERE id=?').run(old, ws.members[1].id);
     assert.equal((await ws.as(0, 'GET', '/api/ws/roster')).json.members.find((m) => m.id === ws.members[1].id).email, 'old+leak@example.com');
+  });
+});
+
+describe('workspace: members can check who was paid, not only how much (#41)', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, [person('Tess Qqqtreasurer', 0, { roles: ['treasurer', 'officer'] }), person('Mona Qqqmember', 4)]); });
+  after(() => h.stop());
+
+  it('each visible payee and memo matches the commitment inside the hash chain, and a changed payee is caught', async () => {
+    assert.equal((await ws.as(0, 'POST', '/api/ws/ledger/receipt', { category: 'dues', amountCents: 1500, payer: 'Zyxwvut Payee', memo: 'Zyxwvut memo' })).status, 200);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/ledger/receipt', { category: 'donations', amountCents: 900, payer: 'A Friend' })).status, 200);
+    const read = async () => [(await ws.as(1, 'GET', '/api/ws/finance/summary')).json.entries, (await ws.as(1, 'GET', '/api/ws/finance/chain')).json.entries];
+    const [entries, chain] = await read();
+    assert.ok(entries.every((e) => typeof e.salt === 'string')); // a member gets what they need to check it
+    assert.deepEqual(checkCommitments(entries, chain), { ok: true, checked: 2, brokenAt: null });
+    // someone with the database and the master key re-encrypts a different payee into entry 1: amounts and hashes are untouched
+    const row = h.app.db.prepare('SELECT id, workspace_id w FROM ws_ledger WHERE seq=1 AND workspace_id=?').get(ws.wsId);
+    const dk = h.app.kms.dataKey(row.w, h.app.db.prepare('SELECT data_key_wrapped k FROM ws_workspaces WHERE id=?').get(row.w).k);
+    h.app.db.exec('DROP TRIGGER IF EXISTS ws_ledger_no_update'); // what a person editing the file directly can do
+    h.app.db.prepare('UPDATE ws_ledger SET payee_enc=? WHERE id=?').run(h.app.kms.enc(dk, 'Somebody Else', 'ledger.payee', row.id), row.id);
+    const [e2, c2] = await read();
+    assert.equal(e2.find((e) => e.seq === 1).payee, 'Somebody Else');
+    assert.deepEqual(checkCommitments(e2, c2), { ok: false, checked: 2, brokenAt: 1 });
+    assert.equal(verifyChain(c2, ledgerFields).ok, true); // the chain alone would not have noticed
   });
 });
 

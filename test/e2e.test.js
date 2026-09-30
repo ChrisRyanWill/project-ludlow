@@ -518,6 +518,7 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
     await alice.locator('details[open] input[type=number]').fill('120.50');
     await btn(alice, /^Record$/).click();
     await alice.getByText(/Checked in your browser: all 1 ledger entries/).waitFor();
+    await alice.getByText(/The payee and note of 1 entries match what was recorded/).waitFor(); // and who was paid, not only how much
     await alice.getByText('$120.50').first().waitFor();
     assert.deepEqual(problems, []);
   });

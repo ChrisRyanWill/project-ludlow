@@ -778,6 +778,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       const redact = REDACTED_CATEGORIES.includes(r.category);
       const priv = r.memo_enc ? decJson(me.dk, LEDGER_PRIVATE[1], r.memo_enc, r.id) : {};
       return { id: r.id, seq: r.seq, date: r.entry_date, kind: r.kind, amountCents: r.amount_cents, category: r.category, payee: redact ? 'Member' : dec(me.dk, LEDGER_PRIVATE[0], r.payee_enc, r.id), memo: redact ? '' : priv.memo || '',
+        ...(redact || typeof priv.salt !== 'string' ? {} : { salt: priv.salt }), // lets the member check payee and memo against the chain (#41)
         reversesSeq: r.reverses_id ? seqOf.get(r.reverses_id) : null, reversed: reversedIds.has(r.id), createdBy: nameOf(me.dk, r.created_by), hash: r.hash };
     };
     const pending = db.prepare("SELECT * FROM ws_disbursements WHERE workspace_id=? AND status IN ('pending','approved') ORDER BY created_at").all(me.wsId).map((d) => {

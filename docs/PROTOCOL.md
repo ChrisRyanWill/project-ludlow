@@ -58,7 +58,7 @@ Known limit: a server operator watching traffic in real time could try to correl
 
 ## 3. Tamper-evident books
 
-Ledger and audit entries form hash chains: `hash_i = H(hash_{i-1} + "|" + canonicalJson(fields_i))`, starting from `GENESIS`. The ledger commits to private text (payee, memo) with `H(salt|payee|memo)`, so members can verify the chain without seeing what is private. Entries are immutable at the database level (triggers). Members' browsers re-derive every hash, and each device pins the newest entry it has seen, so history that is rewritten later is detected the next time anyone looks.
+Ledger and audit entries form hash chains: `hash_i = H(hash_{i-1} + "|" + canonicalJson(fields_i))`, starting from `GENESIS`. The ledger commits to private text (payee, memo) with `H(salt|payee|memo)`, so members can verify the chain without seeing what is private. For every entry whose payee is shown to members (all but redacted categories, such as member benefits), the salt is shown too, and each member's browser re-derives the commitment and compares it with the chain (`checkCommitments` in `shared/verify.js`): the payee or memo of an entry cannot be changed afterwards, even by someone holding the master key, without the chain or a device's pinned head noticing. Redacted entries get no salt, so a guessable payee (a member's name) cannot be confirmed by trying names. Entries are immutable at the database level (triggers). Members' browsers re-derive every hash, and each device pins the newest entry it has seen, so history that is rewritten later is detected the next time anyone looks.
 
 ## 4. Software fingerprint
 
