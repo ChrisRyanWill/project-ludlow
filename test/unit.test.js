@@ -9,6 +9,8 @@ import { makeLimiter } from '../server/rate.js';
 import { clientIp } from '../server/http.js';
 import { loadMasterKey } from '../server/kms.js';
 import { loadConfig } from '../server/config.js';
+import { openDb } from '../server/db.js';
+import Database from 'better-sqlite3';
 import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -544,4 +546,11 @@ test('master key: the development key file is never made for a server reachable 
   const key = C.b64(C.randomBytes(32));
   assert.equal(loadMasterKey(cfg('0.0.0.0', { masterKey: key })).length, 32); // a real key is fine anywhere
   assert.throws(() => loadMasterKey(cfg('127.0.0.1', { production: true })), /required in production/);
+});
+
+test('the database never runs in WAL mode, where one commit would put a voter\'s "has voted" next to their ballot', () => {
+  const file = path.join(mkdtempSync(path.join(tmpdir(), 'ludlow-db-')), 'x.db');
+  const pre = new Database(file); pre.pragma('journal_mode = WAL'); pre.close(); // a file someone switched to WAL, say with the sqlite3 shell
+  const db = openDb(file);
+  try { assert.equal(db.pragma('journal_mode', { simple: true }), 'delete'); } finally { db.close(); }
 });

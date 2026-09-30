@@ -11,9 +11,13 @@ export function openDb(file) {
   const db = new Database(file);
   db.pragma('foreign_keys = ON');
   db.pragma('secure_delete = ON'); // deleted rows (a withdrawn card, a destroyed campaign) are zeroed on disk
-  // Without this, INSERT OR REPLACE deletes the row it replaces WITHOUT firing the delete triggers, which would let anyone with SQL access rewrite
-  // the ledger and the audit log past the "append-only" guards below.
+  // Without this, INSERT OR REPLACE deletes the row it replaces WITHOUT firing the delete triggers, so a code path using it could rewrite the ledger
+  // and the audit log past the "append-only" guards below. It is set per connection: it guards this application's own SQL. Someone who can write the
+  // file directly can drop the triggers; the hash chains and the pins on members' devices are what catch that.
   db.pragma('recursive_triggers = ON');
+  // The rollback journal, never WAL: in WAL mode each commit appends its pages to the log in order, so the cast that marks a member as having voted
+  // and the ballot it stores would sit side by side in one frame set. Pinned here so a file someone switched to WAL is switched back.
+  db.pragma('journal_mode = DELETE');
   db.exec(SCHEMA);
   // Migrations for databases created by earlier versions.
   const cardCols = db.prepare("SELECT name FROM pragma_table_info('cards')").all().map((c) => c.name);

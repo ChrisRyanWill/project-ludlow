@@ -425,6 +425,11 @@ describe('workspace: a recall cannot be blocked or dodged by the person it targe
 
 describe('workspace: the order people voted in is not left on disk', () => {
   let h, ws;
+  const kendall = (a, b) => { // rank correlation of the same items in two orders: 1 identical, -1 reversed, about 0 unrelated
+    const pos = new Map(b.map((x, i) => [x, i])); let c = 0, d = 0;
+    for (let i = 0; i < a.length; i++) for (let j = i + 1; j < a.length; j++) (pos.get(a[i]) < pos.get(a[j]) ? c++ : d++);
+    return (c - d) / (c + d);
+  };
   const BIG = Array.from({ length: 20 }, (_, i) => person(`Voter${i} Qqqperson`, i, i === 0 ? { roles: ['officer', 'election_committee'] } : i < 3 ? { roles: ['election_committee'] } : {}));
   before(async () => { h = await startApp(); ws = await makeWorkspace(h, BIG); });
   after(() => h.stop());
@@ -447,6 +452,10 @@ describe('workspace: the order people voted in is not left on disk', () => {
     for (const [name, onDisk, cast] of [['ballots', ballots, cts], ['receipts', receipts, rhs], ['who has voted', voted, who]]) {
       assert.notDeepEqual(onDisk, cast, `${name} sit in cast order`);
       assert.notDeepEqual(onDisk, mirror(cast), `${name} sit in reverse cast order`);
+      // ...and not nearly in order either: Kendall's tau between the two orders. Random layouts of 20 give |tau| around 0.16 (a bound of 0.7 is over
+      // four standard deviations, so this does not fail by chance); a layout close to cast order, with a row or two moved, scores about 0.9.
+      // (Today the rewrite reads rows back by their random primary key, so re-inserting them already scatters them; the shuffle is a second layer.)
+      assert.ok(Math.abs(kendall(onDisk, cast)) < 0.7, `${name} are laid out close to cast order (tau ${kendall(onDisk, cast).toFixed(2)})`);
     }
     // scrambling only moves rows: everything is still there, and the count still works
     assert.deepEqual([...ballots].sort(), [...cts].sort());
