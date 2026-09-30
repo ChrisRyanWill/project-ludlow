@@ -572,6 +572,22 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
     await dan2.getByText('The contract covers scheduling changes.').waitFor();
     await dan2.getByText('We will pursue this').waitFor();
     assert.deepEqual(h.leaks(['The contract covers scheduling changes']), []);
+    // A website that swaps the chief steward's key after this device has seen it: the worker is warned, and (declining) nothing is sealed or sent
+    const chiefRow = h.app.db.prepare("SELECT m.id, m.box_public_key k FROM ws_members m JOIN ws_roles r ON r.member_id=m.id WHERE r.role='chief_steward' AND r.removed_at IS NULL").get();
+    h.app.db.prepare('UPDATE ws_members SET box_public_key=? WHERE id=?').run(evilKey(), chiefRow.id);
+    const cases = () => h.app.db.prepare('SELECT COUNT(*) c FROM ws_grievances').get().c, casesBefore = cases();
+    const dialogs = [];
+    dan2.removeAllListeners('dialog'); // this page otherwise accepts every dialog
+    dan2.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
+    await nav(dan2, 'Get help');
+    await dan2.getByLabel('What happened?').fill('A second concern that must not be sealed to a swapped key.');
+    await btn(dan2, 'Send it, encrypted').click();
+    await dan2.getByText(/Nothing was sealed or sent, because someone's key changed/).waitFor();
+    assert.equal(dialogs.length, 1);
+    assert.match(dialogs[0], /has changed since this device last used it:\n\n.+: [a-z]+(-[a-z]+){9}\n/); // whose key, and its new key words
+    assert.equal(cases(), casesBefore);
+    h.app.db.prepare('UPDATE ws_members SET box_public_key=? WHERE id=?').run(chiefRow.k, chiefRow.id);
+    dan2.removeAllListeners('dialog'); dan2.on('dialog', (d) => d.accept());
     // Locking ends the session on the server too, not only in this tab
     const sessions = () => h.app.db.prepare('SELECT COUNT(*) c FROM ws_sessions').get().c;
     const before = sessions();

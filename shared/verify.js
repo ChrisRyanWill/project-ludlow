@@ -1,7 +1,7 @@
 // Tamper-evidence any member's browser can check on its own. Every ledger and audit entry commits to
 // the one before it (hash chain), so history cannot be rewritten without every later hash changing.
 // The server publishes the chain; the client re-derives every hash and compares.
-import { chainHash, GENESIS, sha256Hex, sha256Text } from './crypto.js';
+import { chainHash, GENESIS, sha256Hex, sha256Text, keyWords } from './crypto.js';
 import { REDACTED_CATEGORIES } from './constants.js';
 
 // A card carries the SHA-256 of the exact text the signer saw. When the trustees open it, the text must still match: a card that does not was
@@ -60,4 +60,16 @@ export function auditRows(entries, chain) {
     if (!c || c.hash !== e.hash) return { seq: e.seq, actor: null, action: e.action, at: e.at, ok: false };
     return { seq: c.seq, actor: e.actorId === c.actorId ? e.actor ?? null : null, action: c.action, at: c.at, ok: true };
   });
+}
+
+// The public keys of the people a member's browser seals to (chief stewards, stewards, the election committee) come from the server. Each device
+// remembers them; a key that changes is reported, with its key words, before anything is sealed to it (#37, stage 1). Returns the pins to keep if
+// the person goes ahead; the pins passed in are not changed. First sight is remembered silently: this cannot catch a key that was false from the start.
+export function compareKeyPins(pins, holders) {
+  const next = { ...pins }, changed = [];
+  for (const h of holders) {
+    if (pins[h.memberId] && pins[h.memberId] !== h.boxPublicKey) changed.push({ memberId: h.memberId, name: h.name, words: keyWords(h.boxPublicKey) });
+    next[h.memberId] = h.boxPublicKey;
+  }
+  return { changed, pins: next };
 }

@@ -5,6 +5,8 @@ import { api } from './api.js';
 import { t } from './i18n.js';
 import { packOf } from './packs.js';
 import { div, span, p, h1, a, nav, btn, badge, shell, wipers, go, linkBtn } from './ui.js';
+import { store } from './store.js';
+import { compareKeyPins } from '../../shared/verify.js';
 
 export let WS = null; // { token, keys, memberId, workspaceId, info }
 // Locking or leaving ends the session on the server too, so the token in memory is worthless even if it was copied. keepalive lets the request
@@ -29,6 +31,21 @@ export async function wcall(method, path, body) {
     if (e.status === 401 && WS?.keys) { WS.token = await signIn(WS.keys, WS.memberId); return api(method, path, { body, auth: 'Bearer ' + WS.token }); }
     throw e;
   }
+}
+// The people a member's browser seals things to, with their public keys. The keys come from the website, so this device remembers them and, if one
+// has changed since, says whose, shows the new key words and seals nothing unless the person confirms they checked them in person (#37, stage 1).
+export class KeyChanged extends Error { constructor() { super('key_changed'); this.code = 'key_changed'; } }
+export async function keyring(...roles) {
+  const holders = (await Promise.all(roles.map((r) => wcall('GET', `/api/ws/keyring?role=${r}`)))).flatMap((x) => x.holders)
+    .filter((x, i, all) => all.findIndex((y) => y.memberId === x.memberId) === i);
+  const key = `kpin.${WS.workspaceId}`;
+  const { changed, pins } = compareKeyPins(store.get(key) || {}, holders);
+  if (changed.length) {
+    const list = changed.map((c) => `${c.name}: ${c.words}`).join('\n');
+    if (!confirm(t('The key of someone this is sealed to has changed since this device last used it:') + '\n\n' + list + '\n\n' + t('This happens if they set up a new device, or if the website has been tampered with. Only continue if you have checked these key words with them in person.'))) throw new KeyChanged();
+  }
+  store.set(key, pins);
+  return holders;
 }
 export async function refreshMe() { WS.info = await wcall('GET', '/api/ws/me'); return WS.info; }
 export const can = (action) => !!WS?.info?.permissions.includes(action);

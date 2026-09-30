@@ -4,7 +4,7 @@ import * as C from '../../shared/crypto.js';
 import { ApiError } from './api.js';
 import { t } from './i18n.js';
 import { GRIEVANCE_DECISIONS, ARTICLE_REF } from '../../shared/constants.js';
-import { WS, wcall, can, has, wsInfo, wsFrame, pack, urgencyBadge } from './wsbase.js';
+import { WS, wcall, can, has, wsInfo, wsFrame, pack, urgencyBadge, keyring, KeyChanged } from './wsbase.js';
 import {
   div, span, p, a, ul, li, h1, h2, h3, strong, input, textarea, details, summary, btn, callout, badge, field, textInput, selectBox,
   setTitle, view, act, toast, fmtDate, md, readAloud, render, mark, go,
@@ -32,7 +32,7 @@ export async function HelpTab() {
       btn(t('Send it, encrypted'), act(async () => {
         if (F.what.trim().length < 5) return toast(t('Please describe what happened.'), 'bad');
         if (F.article.trim() && !ARTICLE_REF.test(F.article.trim())) return toast(t('Put only the article number there, such as "Art. 12". Everything else belongs in the description, which is encrypted.'), 'bad');
-        const ring = await wcall('GET', '/api/ws/keyring?role=chief_steward');
+        const ring = { holders: await keyring('chief_steward') }; // checked against the keys this device remembers
         if (!ring.holders.length) throw new ApiError(409, 'no_chief_steward');
         const id = C.uuid(), key = C.randomBytes(32);
         const box = C.sealJson(key, { what: F.what, when: F.when, who: F.who, desired: F.desired, filedAt: new Date().toISOString() }, 'grievance|' + id);
@@ -66,7 +66,8 @@ export async function CaseDetail({ id }) {
   if (g.reason) reason = open(g.reason, 'reason|' + id);
   const notes = g.notes.map((n) => ({ ...n, data: open(n, 'note|' + id) }));
   const chief = has('chief_steward');
-  const ring = chief && g.status === 'open' ? [...(await wcall('GET', '/api/ws/keyring?role=steward')).holders, ...(await wcall('GET', '/api/ws/keyring?role=chief_steward')).holders].filter((x, i, arr) => arr.findIndex((y) => y.memberId === x.memberId) === i) : [];
+  let ring = [];
+  if (chief && g.status === 'open') { try { ring = await keyring('steward', 'chief_steward'); } catch (e) { if (!(e instanceof KeyChanged)) throw e; } } // a changed key the person did not confirm: offer no assignment
   const S = { note: '', outcome: 'advance', decision: 'pursue', reason: '', steward: ring[0]?.memberId };
   return wsFrame('help', view((update) => div(
     p(a({ href: '/w/help' }, '← ' + t('All cases'))),
@@ -79,7 +80,7 @@ export async function CaseDetail({ id }) {
     key && g.missingKeys?.length ? div({ class: 'card' }, h3(t('Not everyone who should can read this case')),
       p({ class: 'small muted' }, t('These chief stewards were appointed after the case was filed, so they cannot read or work it until someone who holds the key shares it with them. Sharing seals the key to them alone.')),
       g.missingKeys.map((m) => div({ class: 'row' }, span(m.name),
-        btn(t('Share this case with {name}', { name: m.name }), act(async () => { await wcall('POST', `/api/ws/grievances/${id}/share`, { memberId: m.memberId, sealedKey: C.boxSeal(m.boxPublicKey, key) }); render(); }), { kind: 'secondary small' })))) : null,
+        btn(t('Share this case with {name}', { name: m.name }), act(async () => { const to = (await keyring('chief_steward')).find((x) => x.memberId === m.memberId); if (!to) return; await wcall('POST', `/api/ws/grievances/${id}/share`, { memberId: m.memberId, sealedKey: C.boxSeal(to.boxPublicKey, key) }); render(); }), { kind: 'secondary small' })))) : null,
     div({ class: 'card' }, h2(t('Steps and deadlines')), ul({ class: 'timeline' }, g.steps.map((s) => li({ class: s.completedOn ? 'done' : s.n === g.currentStep && g.status === 'open' ? 'now' : '' },
       strong(s.name), ' ', span({ class: 'small muted' }, `${s.days} ${s.dayType === 'business' ? t('business days') : t('calendar days')}`),
       s.completedOn ? span({ class: 'small' }, ` · ${t('done {d}', { d: fmtDate(s.completedOn) })}: ${s.outcome}`) : s.dueOn ? span({ class: 'small' }, ` · ${t('due {d}', { d: fmtDate(s.dueOn) })} `) : null, !s.completedOn ? urgencyBadge(s.urgency) : null)))),

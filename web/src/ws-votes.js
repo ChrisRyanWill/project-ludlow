@@ -4,7 +4,7 @@ import { POLICY_FIELDS, evaluateVote } from '../../shared/constants.js';
 import { store } from './store.js';
 import { t } from './i18n.js';
 import { keyFilePicker, label3 } from './organize.js';
-import { WS, wcall, can, has, wsInfo, wsFrame, currency } from './wsbase.js';
+import { WS, wcall, can, has, wsInfo, wsFrame, currency, keyring } from './wsbase.js';
 import {
   div, span, p, a, ul, li, h1, h2, h3, strong, input, textarea, details, summary, btn, callout, badge, field, textInput, selectBox, linkBtn,
   setTitle, view, go, act, toast, fmtDate, fmtDateTime, money, render, copy,
@@ -44,7 +44,7 @@ function voteForm({ mode, roles, onDone, prefill = {} }) {
       if (F.type === 'dues_change' && !(dollars(F.amount) >= 0)) return toast(t('Enter the dues amount.'), 'bad');
       if (F.type === 'bylaws_amendment' && !(Number(F.value) >= 0)) return toast(t('Enter the new value.'), 'bad');
       if (mode === 'petition') { await wcall('POST', '/api/ws/petitions', spec); toast(t('Petition started. You are the first signature.')); return onDone(); }
-      const ring = await wcall('GET', '/api/ws/keyring?role=election_committee');
+      const ring = { holders: await keyring('election_committee') }; // checked against the keys this device remembers
       if (ring.holders.length < 2) return toast(t('You need at least two election committee members with claimed accounts before you can hold a vote.'), 'bad');
       const k = Math.max(2, Math.floor(ring.holders.length / 2) + 1); // a majority of the committee must be together to count
       const vk = await C.newVoteKeys(ring.holders, k);
@@ -89,7 +89,7 @@ export async function VotesTab() {
       q.status !== 'opened' && can('petition.sign') && !q.signedByMe ? btn(t('Sign this petition'), act(async () => { await wcall('POST', `/api/ws/petitions/${q.id}/sign`); render(); }), { kind: 'primary small' }) : q.signedByMe && q.status === 'open' ? p({ class: 'small' }, '✓ ' + t('You signed.')) : null,
       q.status === 'qualified' && can('vote.create') ? div({ class: 'row' }, field(t('Open for (days)'), textInput({ type: 'number', min: 1, max: 60, value: S.days[q.id] || 7, oninput: (e) => (S.days[q.id] = Number(e.target.value) || 7) })),
         btn(t('Open this vote'), act(async () => {
-          const ring = await wcall('GET', '/api/ws/keyring?role=election_committee');
+          const ring = { holders: await keyring('election_committee') }; // checked against the keys this device remembers
           if (ring.holders.length < 2) return toast(t('You need at least two election committee members with claimed accounts before you can hold a vote.'), 'bad');
           const k = Math.max(2, Math.floor(ring.holders.length / 2) + 1), vk = await C.newVoteKeys(ring.holders, k);
           const r = await wcall('POST', '/api/ws/votes', { petitionId: q.id, closesAt: new Date(Date.now() + (S.days[q.id] || 7) * 86400_000).toISOString(), votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: k });

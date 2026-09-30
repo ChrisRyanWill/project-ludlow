@@ -805,4 +805,8 @@ export default {
   'Everyone in this vote should see the same words. Compare them with a coworker or someone on the election committee. If yours are different, do not vote: tell the committee.': 'Todas las personas de esta votación deberían ver las mismas palabras. Compáralas con un compañero o con alguien del comité electoral. Si las tuyas son distintas, no votes: avísale al comité.',
   'The ballot key you rebuilt': 'La llave de las papeletas que reconstruyeron',
   'Voters were asked to check these same words before voting. A ballot sealed to any other key shows up below as one that could not be read.': 'A quienes votaron se les pidió comprobar estas mismas palabras antes de votar. Una papeleta sellada con cualquier otra llave aparece abajo como una que no se pudo leer.',
+  // a role holder's key changed (first draft, needs a native reviewer: #10)
+  'The key of someone this is sealed to has changed since this device last used it:': 'La llave de alguien para quien se sella esto cambió desde la última vez que este dispositivo la usó:',
+  'This happens if they set up a new device, or if the website has been tampered with. Only continue if you have checked these key words with them in person.': 'Esto pasa si configuró un dispositivo nuevo, o si alguien manipuló el sitio web. Continúa solo si comprobaste estas palabras clave en persona con esa persona.',
+  'Nothing was sealed or sent, because someone\'s key changed and it was not confirmed. Check their key words with them in person, then try again.': 'No se selló ni se envió nada, porque la llave de alguien cambió y no se confirmó. Comprueba sus palabras clave en persona y vuelve a intentarlo.',
 };

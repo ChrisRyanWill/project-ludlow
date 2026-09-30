@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { zip, crc32, csvCell, toCsv } from '../web/src/zip.js';
-import { verifyChain, auditFields, checkPinned, cardTextMatches, auditRows } from '../shared/verify.js';
+import { verifyChain, auditFields, checkPinned, cardTextMatches, auditRows, compareKeyPins } from '../shared/verify.js';
 import { authenticate, rosterToSign, checkMySeat, checkEnrollment, RosterError } from '../shared/roster.js';
 
 await C.ready;
@@ -668,4 +668,17 @@ test('the audit rows on screen are the ones that were checked: only the name com
   assert.deepEqual(rows.map((r) => [r.action, r.ok]), [['member.pii.read', true], ['role.add:officer', true]]); // what is shown comes from the checked chain...
   assert.equal(rows[1].actor, null); // ...and a name the page attaches to a different person is not shown
   assert.equal(auditRows([{ ...chain[0], seq: 9, hash: 'h9', actor: 'Al' }], chain)[0].ok, false); // a row the chain does not have
+});
+
+test('role holders\' keys are remembered per device, and a changed key is reported before anything is sealed to it', () => {
+  const a = C.newKeypairs(), b = C.newKeypairs(), evil = C.newKeypairs();
+  const first = compareKeyPins({}, [{ memberId: 'm1', name: 'Ana', boxPublicKey: a.boxPublicKey }, { memberId: 'm2', name: 'Ben', boxPublicKey: b.boxPublicKey }]);
+  assert.deepEqual(first.changed, []); // first sight: remembered, nothing to report (this cannot catch a key that was false from the start)
+  assert.deepEqual(Object.keys(first.pins).sort(), ['m1', 'm2']);
+  const same = compareKeyPins(first.pins, [{ memberId: 'm1', name: 'Ana', boxPublicKey: a.boxPublicKey }]);
+  assert.deepEqual(same.changed, []);
+  const swapped = compareKeyPins(first.pins, [{ memberId: 'm1', name: 'Ana', boxPublicKey: evil.boxPublicKey }, { memberId: 'm2', name: 'Ben', boxPublicKey: b.boxPublicKey }]);
+  assert.deepEqual(swapped.changed.map((c) => [c.memberId, c.name, c.words]), [['m1', 'Ana', C.keyWords(evil.boxPublicKey)]]);
+  assert.equal(swapped.pins.m1, evil.boxPublicKey); // what to remember if the person confirms they checked it
+  assert.equal(first.pins.m1, a.boxPublicKey); // the old pins are not changed by looking
 });
