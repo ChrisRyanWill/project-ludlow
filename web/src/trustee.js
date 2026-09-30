@@ -193,7 +193,19 @@ function releaseCard(prog, raw) {
         toast(r.applied ? t('The number is now {n}.', { n: r.releaseMin }) : t('Your vote to lower it to {n} is recorded ({a} of {k}).', { n: V.value, a: r.approvals, k: r.needed }));
         render();
       }), { kind: 'secondary small' })),
-    Object.entries(prog.releaseVotes || {}).map(([v, c]) => p({ class: 'small' }, t('{c} trustee(s) have voted to lower it to {v}.', { c, v }))));
+    Object.entries(prog.releaseVotes || {}).map(([v, c]) => p({ class: 'small' }, t('{c} trustee(s) have voted to lower it to {v}.', { c, v }))),
+    prog.provenance ? provenanceView(prog.provenance) : null);
+}
+// Where the count comes from. A card from a direct invitation counts at once, so one person who invites many people (or makes many cards
+// themselves) can move the count a long way. This shows whether that is happening; it names nobody who signed.
+function provenanceView(pv) {
+  const most = pv.byMembers && pv.mostFromOneMember > 1;
+  return details(summary(t('Where the count comes from')),
+    p({ class: 'small muted' }, t('A card from a direct invitation counts as soon as it is signed. If one person accounts for many of the cards, check with them before relying on the number.')),
+    ul(Object.entries(pv.byTrustee).map(([i, c]) => li(t('{c} from invitations made by trustee {i}', { c, i }))),
+      pv.byMembers ? li(t('{c} from invitations made by {m} member(s)', { c: pv.byMembers, m: pv.membersInviting }), most ? ' ' + t('(at most {n} from any one member)', { n: pv.mostFromOneMember }) : '') : null,
+      pv.confirmedInPerson ? li(t('{c} from group links, confirmed in person', { c: pv.confirmedInPerson })) : null,
+      pv.other ? li(t('{c} invited by a member who has since withdrawn', { c: pv.other })) : null));
 }
 
 // Reports coworkers chose to share. Each is sealed to every trustee, so any one of you can read it.

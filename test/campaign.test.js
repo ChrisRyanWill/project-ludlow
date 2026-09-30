@@ -575,3 +575,30 @@ describe('campaign: a signed trustee request cannot be altered on the way', () =
     assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/release-min`, { auth: await signedFor('{"value":6}'), body: { value: 6 } })).status, 200);
   });
 });
+
+describe('campaign: trustees can see where the release count comes from (#38)', () => {
+  let h, camp;
+  before(async () => { h = await startApp(); camp = await makeCampaign(h, { n: 3, k: 2, releaseMin: 50 }); });
+  after(() => h.stop());
+
+  it('the count is broken down by who made the invitation, without naming any signer', async () => {
+    const byTrustee = async (i, kind = 'direct') => {
+      const token = C.newToken();
+      const r = await h.call('POST', '/api/invites', { auth: await trusteeAuth(h, camp.trustees.find((t) => t.index === i).keys, i, 'POST /api/invites', camp.id), body: { campaignId: camp.id, tokenHash: C.hashToken(token), kind } });
+      assert.equal(r.status, 200); return token;
+    };
+    const A = await signCard(h, camp, await byTrustee(1));
+    await signCard(h, camp, await byTrustee(1));
+    const B = await signCard(h, camp, await byTrustee(2));
+    for (let i = 0; i < 3; i++) await signCard(h, camp, (await makeInvite(h, camp, { by: A })).token); // one member brings in three
+    await signCard(h, camp, (await makeInvite(h, camp, { by: B })).token);
+    const g = await signCard(h, camp, await byTrustee(3, 'group'), {}, { group: true });
+    await signCard(h, camp, await byTrustee(3, 'group'), {}, { group: true }); // not confirmed in person: not counted
+    assert.equal((await h.call('POST', `/api/cards/${g.cardId}/vouch`, { auth: await trusteeAuth(h, camp.trustees[0].keys, 1, 'POST /api/cards/:id/vouch', camp.id), body: { code: g.vouch } })).status, 200);
+    const p = (await h.call('GET', `/api/campaigns/${camp.id}/progress`, { auth: await trusteeAuth(h, camp.trustees[0].keys, 1, 'GET /api/campaigns/:id/progress', camp.id) })).json;
+    assert.equal(p.vouched, 8);
+    assert.deepEqual(p.provenance, { byTrustee: { 1: 2, 2: 1 }, byMembers: 4, membersInviting: 2, mostFromOneMember: 3, confirmedInPerson: 1, other: 0 });
+    // members see the count, not the breakdown
+    assert.equal((await h.call('GET', `/api/campaigns/${camp.id}/progress`, { auth: `Bearer ${A.authToken}` })).json.provenance, undefined);
+  });
+});

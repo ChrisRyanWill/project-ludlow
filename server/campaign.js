@@ -334,6 +334,18 @@ export function campaignRoutes({ router, db, cfg, mail }) {
       history: db.prepare("SELECT substr(created_at,1,10) d, COUNT(*) c FROM cards WHERE campaign_id=? AND status='vouched' AND disavowed_at IS NULL GROUP BY d ORDER BY d").all(id).map((r) => ({ day: r.d, count: r.c })),
     };
     if (trustee) {
+      // Where the count comes from (#38). Anyone who can make direct invitations adds cards that count at once, so the release number is only as
+      // good as the people behind it; this lets the trustees see if one person accounts for much of it. Counts only: no signer is named.
+      const rows = db.prepare(`SELECT i.kind k, i.created_by_trustee_index t, i.created_by_card_id m, COUNT(*) c FROM cards c JOIN invites i ON i.id=c.invite_id
+        WHERE c.campaign_id=? AND c.status='vouched' AND c.disavowed_at IS NULL GROUP BY i.kind, i.created_by_trustee_index, i.created_by_card_id`).all(id);
+      const pv = { byTrustee: {}, byMembers: 0, membersInviting: 0, mostFromOneMember: 0, confirmedInPerson: 0, other: 0 };
+      for (const r of rows) {
+        if (r.k === 'group') pv.confirmedInPerson += r.c;
+        else if (r.t != null) pv.byTrustee[r.t] = (pv.byTrustee[r.t] || 0) + r.c;
+        else if (r.m != null) { pv.byMembers += r.c; pv.membersInviting++; pv.mostFromOneMember = Math.max(pv.mostFromOneMember, r.c); }
+        else pv.other += r.c; // the member who invited them has since withdrawn
+      }
+      out.provenance = pv;
       out.destroyApprovals = count('SELECT COUNT(*) c FROM destroy_approvals WHERE campaign_id=?');
       out.reports = count('SELECT COUNT(*) c FROM reports WHERE campaign_id=?');
       const votes = db.prepare('SELECT trustee_index i, value v FROM release_approvals WHERE campaign_id=?').all(id);
