@@ -415,6 +415,7 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
     const page = await newPage('ws-' + name);
     await page.goto(links['claim:' + name]);
     await page.getByRole('heading', { name: /Welcome to Riverside Workers United/ }).waitFor();
+    assert.equal(await page.evaluate(() => location.hash), ''); // the claim token is not left in the address bar or the history
     const pass = (await page.locator('.passphrase').innerText()).trim();
     const keyFile = await saveDownload(page, () => btn(page, 'Create my key file').click(), `account-${name}.json`);
     await page.locator('.check input').check();

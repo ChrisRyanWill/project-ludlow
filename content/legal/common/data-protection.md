@@ -3,14 +3,16 @@
 # How your data is protected
 
 ## What this site cannot see
-When you sign a card, your name, email, phone number and the card itself are locked with a key that is created on your phone. That key is then split among your trustees so that, once the committee is complete, no single trustee, and not this website, can open it. Only a set number of trustees together (for example 3 of 5) can open cards, and they do it on their own device. Until the founder has confirmed the whole committee, cards are locked to the founder alone.
+When you sign a card, your name, email, phone number and the card itself are locked with a key that is created on your phone. That key is then split among your trustees so that, once every trustee has joined and the founder has confirmed the committee, no single trustee, and not this website, can open it. Only a set number of trustees together (for example 3 of 5) can open cards, and they do it on their own device. Until the founder has confirmed the whole committee, cards are locked to the founder alone.
 
 Your invitation link carries a check of the founder's key (in the part after the "#", which your browser never sends to a server). Your phone compares it with the keys this website hands out, and refuses to sign if they do not match, so a website that tried to give your phone keys of its own would be caught.
 
 The campaign's union name and employer name are encrypted too. The secrets that unlock them travel in the part of a link after the "#", which your browser never sends to a server.
 
 ## What this site can see
-- That a campaign exists, how many cards it has, and when they were signed.
+- That a campaign exists, how many cards it has, when they were signed and whether they have been counted, how many trustees it has and its release number.
+- Which invitation link each card came from, and which card made each link. That shows who invited whom, though not anyone's name.
+- When a confirmation email was sent, and the email provider's id for that message. Together with the email provider's own records, that id could identify who signed.
 - The trustees' public keys, and the committee list the founder signed (neither can open anything).
 - The internet address (IP) of your request, briefly, to limit abuse. It is never written to disk or to logs.
 
@@ -25,7 +27,7 @@ The campaign's union name and employer name are encrypted too. The secrets that 
 - **After you go public**, names are no longer secret. The encryption protects the organizing period, not afterward.
 
 ## After the union goes public (the workspace)
-A union that has gone public must know who its members are. The workspace stores names, emails, phone numbers and addresses encrypted at rest. Officers can see the roster, and every look at your record is logged where you can see it. Grievances and private notes are end-to-end encrypted so only the people assigned can read them. (The keys they are locked to come from the website, and the check that protects cards is not built for them yet, so a website that lied about those keys could read new ones.) Secret ballots are stored without your name or the time you voted, and any member can recount the published ballots. (A website that had been secretly altered could still note which session sent which ballot.) The money ledger is a tamper-evident chain that every member's browser checks and remembers.
+A union that has gone public must know who its members are. The workspace stores names, emails, phone numbers and addresses encrypted at rest. Officers can see the roster, and every look at your contact details is logged where you can see it (your name also appears in other places, such as roles and cases, without a log entry). Grievances and private notes are end-to-end encrypted so only you, every chief steward, and any steward the case is shared with can read them. (The keys they are locked to come from the website, and the check that protects cards is not built for them yet, so a website that lied about those keys could read new ones.) Secret ballots are stored without your name or the time you voted, and any member can recount the published ballots. (A website that had been secretly altered could still note which session sent which ballot.) The money ledger is a tamper-evident chain that every member's browser checks and remembers.
 The server can read at-rest fields (it must, to send mail and print notices). Someone who stole both the database and the server's master key could read them.
 
 TODO(lawyer): review this page and the Terms before real-world use.

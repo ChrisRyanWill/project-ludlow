@@ -65,12 +65,12 @@
     <div class="wrap">
       <h2 id="promises-h">Built so you don't have to trust us</h2>
       <ol class="promises">
-        <li><h3>Nobody can read a card early</h3><p>Cards are encrypted on the signer's phone. The server only ever holds ciphertext, any tampering is detected, and every invitation carries a check of the founder's key, so a phone refuses keys the server made up.</p></li>
+        <li><h3>Nobody can read a card early</h3><p>Cards are encrypted on the signer's phone and the server stores only ciphertext. (The one exception: to send the confirmation email the law requires, it handles the signer's details once and then discards them.) The encryption catches any edit to a card, though not a card that is withheld or deleted, and every invitation carries a check of the founder's key, so a phone refuses keys the server made up.</p></li>
         <li><h3>A lock that is enforced</h3><p>Set a release number when the campaign starts. The server refuses to hand over the sealed cards until that many people have signed and been counted. Lowering the number takes several trustees. It is a safety catch, not proof that real people signed.</p></li>
         <li><h3>Start with one person</h3><p>Organizing begins with a conversation, not a committee. Go live the moment you have a key, then lock your early cards to the full committee when it exists.</p></li>
-        <li><h3>Votes you can recount</h3><p>Ballots are stored with no name or time. After the vote, any member's browser can recount the published ballots and check its own receipt.</p></li>
-        <li><h3>Books that can't be quietly edited</h3><p>The ledger and audit log are hash chains that every member's browser verifies and remembers, so a rewrite it has already seen is caught. Big spending needs two different officers.</p></li>
-        <li><h3>Software you can check</h3><p>No trackers or third-party code, a strict content policy, and reproducible builds, so anyone can compare the served code with the source.</p></li>
+        <li><h3>Votes you can recount</h3><p>Ballots are stored with no name or time. When the committee publishes the ballot key (always, for dues, rules and recalls), any member's browser can recount the ballots and check its own receipt.</p></li>
+        <li><h3>Books that can't be quietly edited</h3><p>The ledger is a hash chain that every member's browser verifies and remembers, so a rewrite it has already seen is caught. Officers' browsers check the audit log the same way. Big spending needs two different officers.</p></li>
+        <li><h3>Software you can check</h3><p>No trackers or third-party code, a strict content policy, and builds designed to be reproducible (they matched byte for byte when last checked), so anyone can compare the served code with the source.</p></li>
       </ol>
     </div>
   </section>
@@ -103,7 +103,7 @@
     <h2 id="any-h">Built for anywhere, and for hard situations</h2>
     <div class="grid3">
       <article class="card"><h3>The law lives in data</h3><p>Thresholds, card wording and document templates are jurisdiction packs, not code. The US (NLRA) and UK (CAC) are in, plus a general pack. Adding a country is adding files.</p></article>
-      <article class="card"><h3>Any language</h3><p>English and Spanish today. A language is one file, and right-to-left scripts are supported. Every legal text is marked as a draft for a qualified reviewer.</p></article>
+      <article class="card"><h3>Any language</h3><p>English, and Spanish for the signing flow and main pages; the trustee dashboard, votes and most of the workspace are English only for now. A language is one file, and right-to-left scripts are supported. Every legal text is marked as a draft for a qualified reviewer.</p></article>
       <article class="card"><h3>Made for risk</h3><p>A quick-exit button, QR invites that leave no message trail, a private record of employer conduct with a filing-deadline clock, neutral tab titles, and no tracking of any kind.</p></article>
     </div>
   </section>
@@ -117,7 +117,7 @@
         <li><strong>The legal text is draft.</strong> Every document carries a warning and open <code>TODO(lawyer)</code> questions. Nothing here is legal advice, and nothing is ever filed or sent for you.</li>
         <li><strong>The release lock is enforced by the server, not by mathematics.</strong> It stops trustees, but not someone who can read the database, so host it where no trustee controls it. It also counts accepted cards, so an insider who can invite people can raise the count.</li>
         <li><strong>A recount checks that the numbers match the stored ballots,</strong> not that none was swapped, and an operator running modified code could see which session sent which ballot.</li>
-        <li><strong>A founder who starts alone can open early cards alone</strong> until the committee is complete. The app says so plainly.</li>
+        <li><strong>A founder who starts alone can open early cards alone</strong> until they confirm the full committee, and any copy of those cards made before they are re-locked stays openable with the founder's key. The app says so plainly.</li>
         <li><strong>Much of it was written with AI assistance</strong> (Claude Code) from written specs, which is exactly why it needs human reviewers.</li>
       </ul>
       <p><a href="https://github.com/ChrisRyanWill/project-ludlow/blob/main/docs/THREAT_MODEL.md" rel="noopener">The full threat model, with everything it does and doesn't protect against &rarr;</a></p>

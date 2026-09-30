@@ -136,8 +136,8 @@ CREATE TABLE IF NOT EXISTS ws_sessions (
   member_id TEXT NOT NULL REFERENCES ws_members(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
 );
--- Append-only and hash-chained: each entry commits to the one before it, so history cannot be
--- quietly rewritten, not even by whoever runs the database.
+-- Append-only and hash-chained: each entry commits to the one before it. The triggers stop this application's own SQL from changing it;
+-- someone who edits the file directly can, but not quietly: the chain breaks and devices that pinned a later entry notice.
 CREATE TABLE IF NOT EXISTS ws_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   workspace_id TEXT NOT NULL, seq INTEGER NOT NULL,

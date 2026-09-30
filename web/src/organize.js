@@ -161,7 +161,7 @@ export function StartPage() {
         const choices = pack.markers.map((m) => ({ n: Math.max(1, m.pct === 0.5 ? Math.floor(size / 2) + 1 : Math.ceil(size * m.pct)), label: m.label })).filter((c, i, a) => a.findIndex((x) => x.n === c.n) === i);
         if (!S.release) S.release = String(choices.find((c) => c.n === Math.floor(size / 2) + 1)?.n ?? Math.floor(size / 2) + 1); // default: a majority
         return div(h2(t('When should the cards be allowed to open?')),
-          p(t('This is a safety lock. Until at least this many people have signed and been counted, the cards stay sealed: nobody can open them, not even all your trustees together, and this website will not hand them over. It is a safety catch, not a guarantee: it counts the cards the system accepted, anyone who can invite people can add cards, and until your committee has joined you alone hold the key.')),
+          p(t('This is a safety lock. Until at least this many people have signed and been counted, the cards stay sealed: nobody can open them, not even all your trustees together, and this website will not hand them over. It is a safety catch, not a guarantee: it counts the cards the system accepted, anyone who can invite people can add cards, and until every trustee has joined and you have confirmed the committee, you alone hold the key.')),
           div({ class: 'stack' }, choices.map((c) => label2(String(c.n), S.release, () => { S.release = String(c.n); update(); }, t('{n} people', { n: c.n }), t(c.label)))),
           field(t('Or choose your own number'), textInput({ type: 'number', min: 1, value: S.release, oninput: (e) => { S.release = e.target.value; } })),
           Number(S.release) > size ? callout('warn', t('That is more than the {n} people you said are in your group. The cards would stay locked until more than everyone has signed.', { n: size })) : null,
@@ -169,8 +169,8 @@ export function StartPage() {
       },
       () => div(h2(t('Your committee of trustees')),
         callout('ok', strong(t('You can start with just yourself.')), ' ', t('You will be able to invite coworkers as soon as you have made your key. Add the other trustees whenever they are ready.')),
-        p(t('Trustees are trusted coworkers who hold the keys. Once your committee is complete, any {k} of the {n} together can open the cards (once the number above is reached). No one can alone, and neither can this website.', { k: S.k, n: S.n })),
-        callout('warn', t('Until at least one more trustee has joined, only you can open the cards. That is fine for the first days, but add trustees soon, and keep your key file safe: it is the only way to open the cards until then.')),
+        p(t('Trustees are trusted coworkers who hold the keys. Once every trustee has joined and you have confirmed the committee, any {k} of the {n} together can open the cards (once the number above is reached). After that, no one can alone, and neither can this website.', { k: S.k, n: S.n })),
+        callout('warn', t('Until every trustee has joined and you have confirmed the committee, only you can open the cards. That is fine for the first days, but add trustees soon, and keep your key file safe: it is the only way to open the cards until then, and it still opens any copy of the early cards made before you lock them to the committee.')),
         field(t('How many trustees do you plan to have?'), selectBox([['3', t('3 trustees (recommended)')], ['5', t('5 trustees')], ['4', '4'], ['2', '2'], ['6', '6'], ['7', '7']], String(S.n), (v) => { S.n = Number(v); S.k = Math.floor(S.n / 2) + 1; clamp(); S.names = Array.from({ length: S.n }, (_, i) => S.names[i] || ''); update(); })),
         field(t('How many must be together to open the cards?'), selectBox(Array.from({ length: S.n - 1 }, (_, i) => [String(i + 2), t('{k} of {n}', { k: i + 2, n: S.n })]), String(S.k), (v) => { S.k = Number(v); update(); }), t('A majority of your trustees is a good choice. You can change this plan later.')),
         S.names.map((nm, i) => field(i === 0 ? t('Your first name or nickname') : t('Trustee {n}: first name or nickname (optional)', { n: i + 1 }), textInput({ value: nm, oninput: (e) => (S.names[i] = e.target.value) })))),
@@ -230,13 +230,13 @@ export async function EnrollPage() {
           p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the cards are locked to the committee, so nobody can slip in a different key.')),
           div({ class: 'keywords', lang: 'en' }, C.keyWords(S.made.pub.boxPublicKey))),
         done ? p(t('Everyone has joined. Trustee 1 now checks each trustee\'s key words with them and confirms the committee. After that, any {k} of the {n} trustees together can open the cards.', { k: raw.k, n: raw.n }))
-          : idx === 1 ? callout('warn', strong(t('You can start inviting coworkers now.')), ' ', t('Until at least one more trustee joins, only you can open the cards. Add trustees from your dashboard when they are ready.'))
+          : idx === 1 ? callout('warn', strong(t('You can start inviting coworkers now.')), ' ', t('Until every trustee has joined and you have confirmed the committee, only you can open the cards. Add trustees from your dashboard when they are ready.'))
             : p(t('Thank you. Trustee 1 will confirm the committee, and lock the early cards to it, once everyone has joined.')),
         linkBtn(t('Go to my trustee dashboard'), '/t/dashboard', 'primary'));
     }
     return div(
       h1(t('Become a trustee for {union}', { union: meta.unionName })),
-      p({ class: 'lead' }, t('You hold one of {n} keys. Any {k} of the trustees together can open the signed cards. Nobody can do it alone, including this website.', { n: raw.n, k: raw.k })),
+      p({ class: 'lead' }, t('You hold one of {n} keys. Once everyone has joined and trustee 1 has confirmed the committee, any {k} of the trustees together can open the signed cards, and nobody can do it alone, including this website. Until then, trustee 1 alone can open them.', { n: raw.n, k: raw.k })),
       p(t('You are trustee {i}{name}.', { i: idx, name: myName ? ` (${myName})` : '' })),
       passphraseNote(),
       idx !== 1 && !isCommit(founderLink) ? callout('warn', t('This invitation is from an older version and has no check of the founder\'s key, so this device will not be able to verify the committee. You can still be a trustee.')) : null,

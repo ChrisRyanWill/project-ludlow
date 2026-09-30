@@ -14,7 +14,7 @@ import { claimsView } from './founding.js';
 import { WS, setWS, signIn, wcall, refreshMe, can, has, wsInfo, currency, wsFrame, urgencyBadge } from './wsbase.js';
 import {
   div, span, p, a, ul, li, h1, h2, h3, strong, input, textarea, details, summary, table, thead, tbody, tr, td, th, mark,
-  btn, callout, badge, field, textInput, selectBox, linkBtn, shell, setTitle, view, fragment, go, act, toast, copy, download, md, money, fmtDate, fmtDateTime, ago, render,
+  btn, callout, badge, field, textInput, selectBox, linkBtn, shell, setTitle, view, fragment, go, act, toast, copy, download, md, money, fmtDate, fmtDateTime, ago, render, scrubFragment,
 } from './ui.js';
 
 const wait = (ms = 40) => new Promise((r) => setTimeout(r, ms));
@@ -29,6 +29,7 @@ export async function ClaimPage() {
   if (!c || !w) return bad(t('This link is incomplete. Ask for it to be sent again, and copy the whole link.'));
   let info;
   try { info = await api('POST', '/api/ws/claim-info', { body: { workspaceId: w, claimToken: c } }); } catch { return bad(t('This link was already used or is not valid. If you already claimed your account, sign in with your key file.')); }
+  scrubFragment(); // the claim token is in memory now; don't leave it in the address bar and the browser's history
   const S = { pass: C.generatePassphrase(), own: false, made: null, saved: false };
   return shell(div({ class: 'wrap' }, view((update) => div(
     h1(t('Welcome to {union}', { union: info.unionName })),
@@ -132,7 +133,7 @@ We represent every employee in the bargaining unit fairly, whether or not they a
 - These rules change only when the members pass an amendment by vote.
 
 ## 3. Votes
-All votes are by secret ballot. After every vote, any member can recount the ballots and check their receipt.
+All votes are by secret ballot. When the election committee publishes a vote's ballot key, and it always does for a decision that changes dues, rules or roles, any member can recount the ballots and check their receipt.
 
 ## 4. Officers
 Officers serve terms of ${P.termMonths} months. Election procedures must be reviewed before your first election. TODO(lawyer): add nomination, notice and mail-ballot procedures for officer elections; federal rules for union officer elections are strict.
