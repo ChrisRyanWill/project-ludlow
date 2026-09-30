@@ -642,6 +642,17 @@ test('the counting page does not suggest publishing the ballot key for votes whe
   assert.doesNotMatch(votes, /afterward any member can recount/); // not true when the committee keeps the key back
 });
 
+test('Spanish: the terms the review flagged stay fixed (one word for key, no password-like "palabras clave", no "unknown" for disavowed)', () => {
+  const es = readFileSync(new URL('../web/src/es.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(es, /\bclaves?\b/); // "llave" throughout, so a key is never confused with a password
+  assert.doesNotMatch(es, /palabras clave/);
+  assert.doesNotMatch(es, /desconocid/); // a disavowed card is not an unknown one
+  assert.doesNotMatch(es, /cerrad[ao]s? para|cerrará para/); // "locked to the committee", not "locked out"
+  assert.doesNotMatch(es, /calendar \(naturales\)/); // it invited typing "naturales" in the step format
+  const help = readFileSync(new URL('../web/src/ws-help.js', import.meta.url), 'utf8');
+  assert.match(help, /naturales/); // and the step format accepts it anyway
+});
+
 test('the database never runs in WAL mode, where one commit would put a voter\'s "has voted" next to their ballot', () => {
   const file = path.join(mkdtempSync(path.join(tmpdir(), 'ludlow-db-')), 'x.db');
   const pre = new Database(file); pre.pragma('journal_mode = WAL'); pre.close(); // a file someone switched to WAL, say with the sqlite3 shell

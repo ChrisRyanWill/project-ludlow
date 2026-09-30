@@ -51,7 +51,7 @@ export async function HelpTab() {
       p({ class: 'small muted' }, t('One step per line: name | days | business or calendar. These deadlines come from your contract. Deadlines are counted for you and stewards get reminders.'), ' ', mark({ class: 'todo' }, 'TODO(lawyer): match this to your contract')),
       textarea({ rows: 5, value: P.steps, oninput: (e) => (P.steps = e.target.value) }), field(t('Holidays (one date per line, YYYY-MM-DD)'), textarea({ rows: 3, value: P.holidays, oninput: (e) => (P.holidays = e.target.value) })),
       btn(t('Save steps'), act(async () => {
-        const steps = P.steps.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((r) => r[0]).map((r) => ({ name: r[0], days: Number(r[1]), dayType: r[2] === 'calendar' ? 'calendar' : 'business' }));
+        const steps = P.steps.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((r) => r[0]).map((r) => ({ name: r[0], days: Number(r[1]), dayType: /^(calendar|calendario|naturales?)$/i.test(r[2] || '') ? 'calendar' : 'business' }));
         await wcall('PUT', '/api/ws/procedure', { steps, holidays: P.holidays.split('\n').map((x) => x.trim()).filter(Boolean) });
         toast(t('Saved.'));
       }), { kind: 'primary small' })) : null)));
