@@ -624,3 +624,11 @@ test('a trustee\'s signature covers the request body: the same signature does no
   assert.equal(C.verifyAuth(k.signPublicKey, C.signAuth(k.signSecretKey, parts), { ...parts, bodyHash: C.bodyHash('') }), false);
   assert.equal(C.bodyHash(undefined), C.bodyHash(''));
 });
+
+test('a passphrase must be long and not a pattern', () => {
+  for (let i = 0; i < 20; i++) assert.ok(C.passphraseOk(C.generatePassphrase()));
+  for (const good of ['correct horse battery staple', 'Tr0ub4dor&3-plus-more', 'my dog ate 7 green socks']) assert.ok(C.passphraseOk(good), good);
+  for (const bad of ['short', 'aaaaaaaaaaaaaaaa', 'abababababababab', 'passwordpassword', '12345678901234567', 'abcdefghijklmnop', 'zyxwvutsrqponmlk', 'test test test test', 'union-union-union-union', 12345678901234, null]) {
+    assert.equal(C.passphraseOk(bad), false, String(bad));
+  }
+});

@@ -40,7 +40,7 @@ export async function ClaimPage() {
         : div(div({ class: 'passphrase', tabindex: 0 }, S.pass), div({ class: 'row' }, btn(t('Copy'), () => copy(S.pass), { kind: 'secondary small' }), btn(t('Another one'), () => { S.pass = C.generatePassphrase(); update(); }, { kind: 'secondary small' }), btn(t('I will choose my own'), () => { S.own = true; S.pass = ''; update(); }, { kind: 'secondary small' })))),
     div({ class: 'card' }, h2(t('2. Save your key file')),
       btn(S.made ? t('Download the key file again') : t('Create my key file'), act(async () => {
-        if (!C.passphraseOk(S.pass)) return toast(t('Your passphrase must be at least 14 characters.'), 'bad');
+        if (!C.passphraseOk(S.pass)) return toast(t('Your passphrase must be at least 14 characters and not a simple pattern (the same letters or words again, or a run like 12345). The generated one is best.'), 'bad');
         if (!S.made) {
           await wait(60);
           const keys = C.newKeypairs();

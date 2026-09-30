@@ -248,7 +248,7 @@ export async function EnrollPage() {
         p({ class: 'small muted' }, t('Write the generated passphrase down or save it in a password manager.'))),
       div({ class: 'card' }, h2(t('2. Create and save your key file')),
         btn(S.made ? t('Download the key file again') : t('Create my key file'), act(async () => {
-          if (!C.passphraseOk(S.pass)) return toast(t('Your passphrase must be at least 14 characters.'), 'bad');
+          if (!C.passphraseOk(S.pass)) return toast(t('Your passphrase must be at least 14 characters and not a simple pattern (the same letters or words again, or a run like 12345). The generated one is best.'), 'bad');
           if (!S.made) {
             await wait(60);
             const keys = C.newKeypairs();

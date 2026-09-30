@@ -145,7 +145,21 @@ export const generatePassphrase = (n = 6) => Array.from({ length: n }, word).joi
 export const vouchCode = () => (word() + '-' + word()).toUpperCase();
 export const normalizeCode = (c) => String(c).trim().toUpperCase().replace(/[\s_]+/g, '-');
 export const vouchHash = (cardId, code) => sha256b64(utf8('vouch|' + cardId + '|' + normalizeCode(code)));
-export const passphraseOk = (p) => typeof p === 'string' && (p.length >= 14 || p.trim().split(/[\s-]+/).length >= 4 && p.length >= 12);
+// The passphrase and the Argon2id cost are all that protect a key file copied off a device, so length alone is not enough: a repeated
+// pattern of 14 characters is long and still guessed at once. No dictionary check (that would be a dependency); generatePassphrase() is the advice.
+export function passphraseOk(p) {
+  if (typeof p !== 'string') return false;
+  const words = p.trim().toLowerCase().split(/[\s-]+/).filter(Boolean);
+  if (!(p.length >= 14 || (words.length >= 4 && p.length >= 12))) return false;
+  const q = p.toLowerCase();
+  if (new Set(q).size < 6) return false; // 'aaaa...', 'abab...'
+  if (/^(.+?)\1+$/.test(q.replace(/[\s-]+/g, ''))) return false; // one piece repeated: 'passwordpassword', 'union-union-union-union'
+  let breaks = 0;
+  for (let i = 1; i < q.length; i++) if (Math.abs(q.charCodeAt(i) - q.charCodeAt(i - 1)) !== 1) breaks++;
+  if (breaks <= 2) return false; // a straight run: '1234567890...', 'abcdef...', backwards too
+  if (words.length >= 4 && new Set(words).size < 3) return false; // the same word again and again
+  return true;
+}
 
 // Words that stand for a public key, so two people can check it aloud ("read me the words on your screen"). They identify a key and are
 // not secret. The list has 205 words (about 7.7 bits each), so ten words are about 77 bits: enough that nobody can grind out a different
