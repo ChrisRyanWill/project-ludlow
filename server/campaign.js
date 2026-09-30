@@ -23,10 +23,32 @@ export function sweepInactive(db, days) {
   return db.prepare('DELETE FROM campaigns WHERE last_activity_at < ?').run(cutoff).changes;
 }
 
+// The mailbox an address reaches, for counting only: case, a "+tag" and (for Gmail) dots do not make it a different inbox.
+export function mailboxKey(address) {
+  const [local, domain] = String(address).trim().toLowerCase().split(/@(?=[^@]*$)/);
+  let user = (local || '').split('+')[0];
+  const d = domain === 'googlemail.com' ? 'gmail.com' : domain;
+  if (d === 'gmail.com') user = user.replace(/\./g, '');
+  return user + '@' + d;
+}
+
 export function campaignRoutes({ router, db, cfg, mail }) {
   const R = (method, pattern, opts, handler) => router.add(method, pattern, opts, handler);
   // One address gets at most three confirmations a day. Counted in memory only, under a salt that rotates daily: nothing about the address is stored.
   const perRecipient = makeLimiter({ disabled: cfg.rateLimitDisabled, windowMs: 86_400_000, max: 3 });
+  // What one campaign has made go out today, also in memory: counting rows in the database would forget every card that was withdrawn since.
+  // A slot is reserved only when every other check has passed, and given back if the email could not be sent.
+  const sentToday = new Map(); // campaignId -> { n, reset }
+  const campaignSlot = (id, delta) => {
+    const t = Date.now();
+    if (sentToday.size > 10_000) for (const [k, v] of sentToday) if (v.reset < t) sentToday.delete(k);
+    let e = sentToday.get(id);
+    if (!e || e.reset < t) { e = { n: 0, reset: t + 86_400_000 }; sentToday.set(id, e); }
+    if (delta > 0 && e.n >= cfg.confirmationsPerCampaignPerDay) return false;
+    e.n = Math.max(0, e.n + delta);
+    return true;
+  };
+  const sending = new Set(); // cards whose confirmation is on its way, so a second request at the same moment cannot send it twice
   const touch = (id) => db.prepare('UPDATE campaigns SET last_activity_at=? WHERE id=?').run(now(), id);
 
   // A trustee proves who they are by signing a fresh challenge; returns the trustee's index.
@@ -219,13 +241,20 @@ export function campaignRoutes({ router, db, cfg, mail }) {
       || !isStr(b.unionName, 200) || !isStr(b.cardText, 4000) || !isTok(b.disavowToken) || !equal(hashToken(b.disavowToken), card.disavow_token_hash)) fail(400, 'bad_request');
     // Anyone can start a campaign and sign a card, so this route must not become a way to send mail from this server to arbitrary people:
     // limit what one address can receive, and how much one campaign can make go out in a day.
-    if (!perRecipient(b.to.toLowerCase())) fail(429, 'too_many_for_this_address');
+    if (sending.has(card.id)) fail(409, 'already_sent');
     const since = new Date(Date.now() - 86400_000).toISOString();
     if (db.prepare('SELECT COUNT(*) c FROM cards WHERE campaign_id=? AND confirmation_sent_at > ?').get(card.campaign_id, since).c >= cfg.confirmationsPerCampaignPerDay) fail(429, 'confirmations_capped');
+    const today = sentToday.get(card.campaign_id);
+    if (today && today.reset > Date.now() && today.n >= cfg.confirmationsPerCampaignPerDay) fail(429, 'confirmations_capped');
+    if (!perRecipient(mailboxKey(b.to))) fail(429, 'too_many_for_this_address');
+    if (!campaignSlot(card.campaign_id, 1)) fail(429, 'confirmations_capped');
     const email = confirmationEmail({ appName: cfg.appName, baseUrl: cfg.baseUrl, card: b, signedAt: card.created_at, cardId: card.id, disavowToken: b.disavowToken, templateVersion: card.template_version });
     let sent;
-    try { sent = await mail.send({ to: b.to, subject: email.subject, text: email.text, replyTo: cfg.replyTo }); } catch { fail(502, 'email_failed'); }
-    db.prepare('UPDATE cards SET confirmation_sent_at=?, confirmation_message_id=? WHERE id=?').run(now(), String(sent.messageId).slice(0, 100), card.id);
+    sending.add(card.id);
+    try {
+      try { sent = await mail.send({ to: b.to, subject: email.subject, text: email.text, replyTo: cfg.replyTo }); } catch { campaignSlot(card.campaign_id, -1); fail(502, 'email_failed'); }
+      db.prepare('UPDATE cards SET confirmation_sent_at=?, confirmation_message_id=? WHERE id=?').run(now(), String(sent.messageId).slice(0, 100), card.id);
+    } finally { sending.delete(card.id); }
     return { sent: true };
   });
 

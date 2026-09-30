@@ -510,4 +510,48 @@ describe('campaign: the confirmation email cannot be used to send mail to arbitr
     assert.equal(capped.status, 429);
     assert.equal(capped.json.error, 'confirmations_capped');
   });
+
+  it('withdrawing cards does not reset the campaign\'s daily count', async () => {
+    const h2 = await startApp({ rateLimitDisabled: false, confirmationsPerCampaignPerDay: 3 });
+    try {
+      const c2 = await makeCampaign(h2, { n: 3, k: 2 });
+      const statuses = [];
+      for (let i = 0; i < 5; i++) {
+        const inv = await makeInvite(h2, c2);
+        const card = await signCard(h2, c2, inv.token, { name: 'Pat Signer', email: `loop${i}@example.net` });
+        statuses.push((await confirm(h2, c2, card)).status);
+        await h2.call('DELETE', '/api/cards/me', { auth: card.auth }); // the card is gone, but the email went out
+      }
+      assert.deepEqual(statuses, [200, 200, 200, 429, 429]);
+    } finally { await h2.stop(); }
+  });
+
+  it('spelling an address differently does not reach it more often', async () => {
+    const h4 = await startApp({ rateLimitDisabled: false });
+    try {
+      const c4 = await makeCampaign(h4, { n: 3, k: 2 });
+      const send = async (email) => (await confirm(h4, c4, await signCard(h4, c4, (await makeInvite(h4, c4)).token, { name: 'Pat Signer', email }))).json.error || 'sent';
+      const results = [];
+      for (const v of ['Target+a@Example.net', 'target+b@example.net', 'TARGET@example.net', 'target+c@example.net']) results.push(await send(v));
+      assert.deepEqual(results, ['sent', 'sent', 'sent', 'too_many_for_this_address']);
+      const gmail = [];
+      for (const v of ['g.m.a.i.l.user@gmail.com', 'gmailuser@googlemail.com', 'GmailUser+x@gmail.com', 'gmail.user@gmail.com']) gmail.push(await send(v));
+      assert.deepEqual(gmail, ['sent', 'sent', 'sent', 'too_many_for_this_address']);
+      assert.equal(await send('gmail.user@example.org'), 'sent'); // dots matter everywhere else
+    } finally { await h4.stop(); }
+  });
+
+  it('two confirmations sent at the same moment send one email', async () => {
+    const h3 = await startApp();
+    try {
+      const c3 = await makeCampaign(h3, { n: 3, k: 2 });
+      const inv = await makeInvite(h3, c3);
+      const card = await signCard(h3, c3, inv.token, { name: 'Pat Signer', email: 'race@example.net' });
+      const send = h3.app.mail.send; h3.app.mail.send = async (m) => { await new Promise((r) => setTimeout(r, 50)); return send(m); }; // a real provider takes a moment
+      const before = h3.app.mail.outbox.length;
+      const both = await Promise.all([confirm(h3, c3, card), confirm(h3, c3, card)]);
+      assert.deepEqual(both.map((r) => r.status).sort(), [200, 409]);
+      assert.equal(h3.app.mail.outbox.length - before, 1);
+    } finally { await h3.stop(); }
+  });
 });
