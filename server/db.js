@@ -35,6 +35,9 @@ export function openDb(file) {
 }
 
 export const SCHEMA = `
+-- One-time steps that must never run again (for example a re-encryption that would otherwise accept values pasted in later).
+CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
 -- ================= Campaign system (zero-knowledge) =================
 CREATE TABLE IF NOT EXISTS campaigns (
   id TEXT PRIMARY KEY,

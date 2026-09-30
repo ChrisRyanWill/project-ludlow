@@ -41,7 +41,10 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   };
   const decJson = (dk, aad, v, rowId) => { const t = dec(dk, aad, v, rowId); try { return t ? JSON.parse(t) : {}; } catch { return { memo: UNREADABLE }; } };
   // Start-up migration: re-encrypt column-only ('v1') member and spending fields so they are bound to their row. Idempotent; one transaction.
+  // Runs once. After it has succeeded, an old-form value found in these columns can only have been pasted in by someone with the database, so a
+  // later start must leave it unreadable rather than bind it to the row it was pasted into.
   (function bindFieldsToRows() {
+    if (db.prepare("SELECT 1 FROM app_meta WHERE key='fields_bound_to_rows'").get()) return;
     const tables = [
       ['ws_members', { legal_name_enc: 'member.legal_name', email_enc: 'member.email', phone_enc: 'member.phone', address_enc: 'member.address', job_title_enc: 'member.job_title' }],
       ['ws_disbursements', { payee_enc: 'disb.payee', memo_enc: 'disb.memo' }],
@@ -59,6 +62,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
           }
         }
       }
+      db.prepare("INSERT INTO app_meta (key, value) VALUES ('fields_bound_to_rows', ?)").run(now());
     })();
   })();
   const person = (dk, m, full = true) => ({

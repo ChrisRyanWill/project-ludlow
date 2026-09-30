@@ -408,6 +408,10 @@ describe('workspace: an encrypted field belongs to its row', () => {
     const dk = h.app.kms.dataKey(ws.wsId, h.app.db.prepare('SELECT data_key_wrapped w FROM ws_workspaces WHERE id=?').get(ws.wsId).w);
     const v1 = (text, aad) => { const box = C.aeadSeal(dk, C.utf8(text), aad); return 'v1.' + box.nonce + '.' + box.ciphertext; }; // bound to the column only
     h.app.db.prepare('UPDATE ws_members SET email_enc=?, legal_name_enc=? WHERE id=?').run(v1('old+leak@example.com', 'member.email'), v1('Mona Qqqmember', 'member.legal_name'), ws.members[1].id);
+    const disb = (id, payee, memo) => h.app.db.prepare("INSERT INTO ws_disbursements (id,workspace_id,requested_by,amount_cents,category,payee_enc,memo_enc,required_approvals,created_at) VALUES (?,?,?,100,'office',?,?,2,'2026-01-01')")
+      .run(id, ws.wsId, ws.members[0].id, payee, memo);
+    disb('d-old', v1('Zyxwvut Old Payee', 'disb.payee'), v1('Zyxwvut old memo', 'disb.memo'));
+    h.app.db.prepare("DELETE FROM app_meta WHERE key='fields_bound_to_rows'").run(); // a database written by the earlier version
     // a restart on the same database and master key
     const again = await startApp({ dbPath: h.app.cfg.dbPath, masterKey: h.app.cfg.masterKey });
     try {
@@ -420,7 +424,35 @@ describe('workspace: an encrypted field belongs to its row', () => {
       // an old-form value pasted in afterwards is not accepted
       again.app.db.prepare('UPDATE ws_members SET email_enc=? WHERE id=?').run(v1('someone.else@example.com', 'member.email'), ws.members[1].id);
       assert.equal((await again.call('GET', '/api/ws/roster', { auth: m.auth })).json.members.find((x) => x.id === ws.members[1].id).email, '[unreadable]');
+      // the payments waiting for approval were moved too
+      const d = again.app.db.prepare("SELECT payee_enc p, memo_enc m FROM ws_disbursements WHERE id='d-old'").get();
+      assert.match(d.p, /^v2\./); assert.match(d.m, /^v2\./);
+      const pend = (await again.call('GET', '/api/ws/finance/summary', { auth: m.auth })).json.pending.find((x) => x.id === 'd-old');
+      assert.equal(pend.payee, 'Zyxwvut Old Payee'); assert.equal(pend.memo, 'Zyxwvut old memo');
+      // an old-form payee pasted in after the move is not accepted either
+      again.app.db.prepare("UPDATE ws_disbursements SET payee_enc=? WHERE id='d-old'").run(v1('Zyxwvut Swapped Payee', 'disb.payee'));
+      assert.equal((await again.call('GET', '/api/ws/finance/summary', { auth: m.auth })).json.pending.find((x) => x.id === 'd-old').payee, '[unreadable]');
     } finally { await again.stop(); }
+    // the move happens once: old-form values pasted in after it are never re-encrypted (and so made readable) by a later restart
+    const third = await startApp({ dbPath: h.app.cfg.dbPath, masterKey: h.app.cfg.masterKey });
+    try {
+      assert.match(third.app.db.prepare('SELECT email_enc e FROM ws_members WHERE id=?').get(ws.members[1].id).e, /^v1\./);
+      assert.match(third.app.db.prepare("SELECT payee_enc p FROM ws_disbursements WHERE id='d-old'").get().p, /^v1\./);
+      const m = await login(third, { id: ws.members[0].id, keys: ws.members[0].keys });
+      assert.equal((await third.call('GET', '/api/ws/roster', { auth: m.auth })).json.members.find((x) => x.id === ws.members[1].id).email, '[unreadable]');
+      assert.equal((await third.call('GET', '/api/ws/finance/summary', { auth: m.auth })).json.pending.find((x) => x.id === 'd-old').payee, '[unreadable]');
+    } finally { await third.stop(); }
+  });
+
+  it('a row-bound value moved to another column of the same row is not shown there', async () => {
+    const r = h.app.db.prepare('SELECT email_enc e, phone_enc p FROM ws_members WHERE id=?').get(ws.members[2].id);
+    assert.match(r.e, /^v2\./);
+    h.app.db.prepare('UPDATE ws_members SET phone_enc=? WHERE id=?').run(r.e, ws.members[2].id); // the email, pasted as the phone
+    try {
+      const list = (await ws.as(0, 'GET', '/api/ws/roster')).json.members;
+      const marco = list.find((x) => x.id === ws.members[2].id);
+      assert.equal(marco.phone, '[unreadable]'); assert.equal(marco.email, 'marco+leak@example.com');
+    } finally { h.app.db.prepare('UPDATE ws_members SET phone_enc=? WHERE id=?').run(r.p, ws.members[2].id); }
   });
 });
 
