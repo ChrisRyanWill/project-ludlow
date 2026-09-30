@@ -47,6 +47,16 @@ test('key file: round trip, wrong passphrase, and header tampering', () => {
   assert.throws(() => C.openKeyFile(file, 'wrong passphrase entirely'), /wrong_passphrase/);
   assert.throws(() => C.openKeyFile({ ...file, trusteeIndex: 1 }, 'correct horse battery staple'), /wrong_passphrase/); // cannot be moved to another trustee
   assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, memlimit: 2 ** 40 } }, 'x'), /bad_keyfile/); // refuses absurd KDF costs
+  const pass = 'correct horse battery staple';
+  assert.throws(() => C.openKeyFile({ ...file, format: 'member-keyfile-v1' }, pass), /wrong_passphrase/); // format is bound in
+  assert.throws(() => C.openKeyFile({ ...file, nonce: flip(file.nonce) }, pass), /wrong_passphrase/);
+  assert.throws(() => C.openKeyFile({ ...file, ciphertext: flip(file.ciphertext) }, pass), /wrong_passphrase/);
+  assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, salt: flip(file.kdf.salt) } }, pass), /wrong_passphrase/);
+  const cheap = C.makeKeyFile({ format: 'trustee-keyfile-v1', header: { campaignId: 'c1', trusteeIndex: 2 }, secrets, passphrase: pass, fast: true });
+  assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, opslimit: cheap.kdf.opslimit + 1 } }, pass), /wrong_passphrase/); // the cost is part of the key
+  assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, opslimit: 2 ** 40 } }, 'x'), /bad_keyfile/);
+  assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, alg: 'argon2i13' } }, pass), /bad_keyfile/);
+  for (const broken of [null, {}, { ...file, kdf: undefined }, { ...file, format: '' }]) assert.throws(() => C.openKeyFile(broken, pass), /bad_keyfile/);
   assert.ok(C.passphraseOk(C.generatePassphrase()));
   assert.ok(!C.passphraseOk('short'));
 });
@@ -74,6 +84,8 @@ test('reports shared with the committee: any one trustee can read, outsiders can
   for (const t of ts) assert.deepEqual(C.openReport(r, t.index, t.keys.boxPublicKey, t.keys.boxSecretKey), { what: 'boss asked who signed' });
   const outsider = C.newKeypairs();
   assert.throws(() => C.openReport(r, 1, outsider.boxPublicKey, outsider.boxSecretKey));
+  assert.throws(() => C.openReport({ ...r, id: 'r2' }, 1, ts[0].keys.boxPublicKey, ts[0].keys.boxSecretKey)); // bound to its id: cannot be replayed as another report
+  assert.throws(() => C.openReport(r, 4, ts[0].keys.boxPublicKey, ts[0].keys.boxSecretKey), /not_for_you/);
 });
 
 test('secret ballots: sealed to a key nobody holds whole; k committee members recount', async () => {
@@ -87,10 +99,22 @@ test('secret ballots: sealed to a key nobody holds whole; k committee members re
   assert.equal(C.publicFromSecret(sk), vk.votePublicKey);
   assert.deepEqual(C.countBallots(vk.votePublicKey, sk, cast.map((c) => c.ciphertext), 3), { counts: [3, 1, 1], invalid: 0 });
   await assert.rejects(C.reconstructVoteKey([mine(committee[0])])); // one member alone cannot
-  const wrong = await C.reconstructVoteKey([mine(committee[0]), mine(committee[1]), new Uint8Array(33).fill(7)]).catch(() => null);
-  if (wrong) assert.notEqual(C.publicFromSecret(wrong), vk.votePublicKey);
+  // A made-up share still combines (Shamir cannot tell), but into a key that does not match the vote's public key.
+  const wrong = await C.reconstructVoteKey([mine(committee[0]), mine(committee[1]), new Uint8Array(33).fill(7)]);
+  assert.notEqual(C.publicFromSecret(wrong), vk.votePublicKey);
+  const bent = mine(committee[1]); bent[0] ^= 1; // one flipped bit in a real share
+  assert.notEqual(C.publicFromSecret(await C.reconstructVoteKey([mine(committee[0]), bent])), vk.votePublicKey);
+  await assert.rejects(C.reconstructVoteKey([mine(committee[0]), mine(committee[0])]), /bad_shares/); // the same share twice is not two
   const junk = C.countBallots(vk.votePublicKey, sk, ['A'.repeat(107)], 3);
   assert.equal(junk.invalid, 1);
+  // Out-of-range choices (a tampered client) are counted as invalid, never folded into an option.
+  const odd = [3, 255, -1].map((o) => C.castBallot(vk.votePublicKey, o).ciphertext);
+  assert.deepEqual(C.countBallots(vk.votePublicKey, sk, odd, 3), { counts: [0, 0, 0], invalid: 3 });
+  // Sealed to another key: invalid, not counted.
+  const other = C.newKeypairs();
+  assert.deepEqual(C.countBallots(vk.votePublicKey, sk, [C.castBallot(other.boxPublicKey, 0).ciphertext], 3), { counts: [0, 0, 0], invalid: 1 });
+  // countBallots counts what it is given: de-duplication is the server's job (one ballot per receipt), so a copy counts twice here.
+  assert.deepEqual(C.countBallots(vk.votePublicKey, sk, [cast[3].ciphertext, cast[3].ciphertext], 3).counts, [0, 0, 2]);
   assert.equal(C.receiptHash(cast[0].receiptCode), cast[0].receiptHash);
   assert.equal(C.receiptHash(cast[0].receiptCode.toLowerCase()), cast[0].receiptHash);
 });
@@ -105,6 +129,11 @@ test('hash chain is deterministic and any edit changes every later hash', () => 
   assert.notEqual(t[1], a[1]);
   assert.notEqual(t[2], a[2]);
   assert.equal(C.canonicalJson({ b: 1, a: [2, { d: 1, c: 2 }] }), '{"a":[2,{"c":2,"d":1}],"b":1}');
+  assert.equal(C.canonicalJson({ a: undefined, b: null, c: [] , d: {} }), '{"b":null,"c":[],"d":{}}'); // undefined keys dropped, null kept
+  assert.equal(C.canonicalJson({ 'é': 1, z: 2, Z: 3, 10: 4, 9: 5 }), C.canonicalJson({ 9: 5, 10: 4, Z: 3, z: 2, 'é': 1 })); // insertion order never matters
+  assert.equal(C.canonicalJson('a"b\u2028'), JSON.stringify('a"b\u2028'));
+  assert.notEqual(C.canonicalJson({ a: '1' }), C.canonicalJson({ a: 1 })); // types are kept apart
+  assert.notEqual(C.canonicalJson(['a,b']), C.canonicalJson(['a', 'b']));
   assert.equal(C.vouchHash('id', ' maple  river '), C.vouchHash('id', 'MAPLE-RIVER'));
 });
 
