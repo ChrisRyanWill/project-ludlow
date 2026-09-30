@@ -15,7 +15,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { zip, crc32, csvCell, toCsv } from '../web/src/zip.js';
 import { verifyChain, auditFields, checkPinned } from '../shared/verify.js';
-import { authenticate, rosterToSign, checkMySeat, RosterError } from '../shared/roster.js';
+import { authenticate, rosterToSign, checkMySeat, checkEnrollment, RosterError } from '../shared/roster.js';
 
 await C.ready;
 const flip = (s) => s.slice(0, -2) + (s.at(-2) === 'A' ? 'B' : 'A') + s.at(-1);
@@ -482,6 +482,24 @@ test('the founder signs only a roster built from their own key and the committee
     refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x, i) => (i === 0 ? { ...x, ...swap } : x)) }), 'camp-1', F), 'own_seat_mismatch');
   }
   refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x) => (x.index === 3 ? { ...x, boxPublicKey: 'short' } : x)) }), 'camp-1', F), 'committee_incomplete');
+});
+
+test('the founder signs the threshold they chose, not one the server reports', () => {
+  const w = rosterWorld(5, 4), F = w.ts[0].keys;
+  assert.equal(rosterToSign(w.raw({ roster: null }), 'camp-1', F, { k: 4, n: 5 }).k, 4);
+  refuses(() => rosterToSign(w.raw({ roster: null, k: 2 }), 'camp-1', F, { k: 4, n: 5 }), 'plan_mismatch'); // the server lowered it
+  refuses(() => rosterToSign(w.raw({ roster: null }), 'camp-1', F, { k: 3, n: 5 }), 'plan_mismatch');
+  assert.equal(rosterToSign(w.raw({ roster: null }), 'camp-1', F).k, 4); // no remembered plan (another device): the page shows the numbers instead
+});
+
+test('a trustee invitation cannot be turned into the founder\'s seat, or point at a different founder', () => {
+  const w = rosterWorld(3, 2);
+  assert.equal(checkEnrollment(w.raw({ roster: null, trustees: w.listed(0) }), 1, undefined), 'founder'); // the founder's own link has no check: there is nothing to check yet
+  assert.equal(checkEnrollment(w.raw({ roster: null, trustees: w.listed(1) }), 2, w.commit), 'ok');
+  refuses(() => checkEnrollment(w.raw({ roster: null, trustees: w.listed(1) }), 1, w.commit), 'not_founder'); // a link with a founder check is never the founder's
+  refuses(() => checkEnrollment(w.raw({ roster: null, trustees: w.listed(1) }), 2, rosterWorld().commit), 'founder_mismatch'); // seat 1 is not who the link says
+  refuses(() => checkEnrollment(w.raw({ roster: null, trustees: w.listed(0) }), 2, w.commit), 'no_founder'); // seat 1 has not joined, so the check cannot be made
+  assert.equal(checkEnrollment(w.raw({ roster: null, trustees: w.listed(1) }), 2, undefined), 'unchecked'); // an older link: allowed, with the existing warning
 });
 
 test('a trustee can check that the roster the founder signed contains their own key', () => {

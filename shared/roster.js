@@ -30,10 +30,13 @@ export function authenticate(raw, commit, campaignId) {
 
 // The founder's side: the roster to sign, built from the committee as the server lists it. The founder has checked each trustee's key words against
 // exactly these keys, and their own seat must be their own keys (a server could otherwise put a different key in the founder's seat).
-export function rosterToSign(raw, campaignId, ownKeys) {
+// `plan`, when this device remembers it, is the { k, n } the founder chose (when creating the campaign or saving a new plan): the server's k and n
+// must match it, so a server cannot have the founder sign a lower threshold than they meant. Key words cover the keys, not the numbers.
+export function rosterToSign(raw, campaignId, ownKeys, plan) {
   const seats = Array.isArray(raw?.trustees) ? [...raw.trustees].sort((a, b) => a.index - b.index) : [];
   if (!seats.length || seats.length !== raw.n || seats.some((x, i) => x.index !== i + 1 || !x.enrolled || !isKey(x.boxPublicKey))) throw new RosterError('committee_incomplete');
   if (seats[0].boxPublicKey !== ownKeys.boxPublicKey || seats[0].signPublicKey !== ownKeys.signPublicKey) throw new RosterError('own_seat_mismatch');
+  if (plan && (plan.k !== raw.k || plan.n !== raw.n)) throw new RosterError('plan_mismatch');
   const roster = { campaignId, k: raw.k, n: raw.n, seats: seats.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey })) };
   if (!rosterShapeOk(roster)) throw new RosterError('roster_invalid');
   return roster;
@@ -47,5 +50,17 @@ export function checkMySeat(raw, commit, campaignId, index, boxPublicKey) {
   if (!isCommit(commit)) return 'unknown';
   const a = authenticate(raw, commit, campaignId);
   if (a.seats.find((s) => s.index === index)?.boxPublicKey !== boxPublicKey) throw new RosterError('my_key_missing');
+  return 'ok';
+}
+
+// Enrolling as a trustee. The seat number comes from the server, so it is checked against the link: only the founder's own first link has no founder
+// check (the founder has no keys yet); every link the founder hands out carries one. So a link with a check is never seat 1, and seat 1 must be the
+// founder it names. Returns 'founder', 'ok', or 'unchecked' (an older link with no check); throws RosterError otherwise.
+export function checkEnrollment(raw, index, commit) {
+  if (!isCommit(commit)) return index === 1 ? 'founder' : 'unchecked';
+  if (index === 1) throw new RosterError('not_founder');
+  const seat1 = Array.isArray(raw?.trustees) ? raw.trustees.find((x) => x?.index === 1) : null;
+  if (!seat1 || !seat1.enrolled || !isKey(seat1.boxPublicKey) || !isKey(seat1.signPublicKey)) throw new RosterError('no_founder');
+  if (founderCommit(seat1.boxPublicKey, seat1.signPublicKey) !== commit) throw new RosterError('founder_mismatch');
   return 'ok';
 }

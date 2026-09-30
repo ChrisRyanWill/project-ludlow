@@ -58,6 +58,8 @@ const FRIENDLY = {
   roster_invalid: 'The committee this website showed is not the one the founder signed, so nothing was signed or sent. The website may have been tampered with. Tell whoever invited you, in person or by phone.',
   roster_mismatch: 'The committee this website lists does not match the roster that was signed, so nothing was signed or sent. If you were invited to sign a card, the website may have been tampered with: tell whoever invited you, in person or by phone. If you are trustee 1, look again and check your key words.',
   committee_incomplete: 'Not every trustee has joined yet.',
+  plan_mismatch: 'The website says a different number of trustees, or a different number needed together, than you chose. Nothing was signed. Look at the plan again before you confirm: something may be wrong.',
+  not_founder: 'This invitation is for a trustee, but the website put you in the founder\'s seat. Nothing was set up. Tell trustee 1 in person or by phone.',
   own_seat_mismatch: 'The website put a key in your own seat that is not yours. Do not confirm the committee: something is wrong. Tell the other trustees.',
   my_key_missing: 'The committee the founder signed does not contain your key. Talk to trustee 1 before you trust this campaign.',
   roster_not_confirmed: 'The founder has not confirmed the committee yet.',

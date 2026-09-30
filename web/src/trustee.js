@@ -120,7 +120,7 @@ function committeeCard(raw, meta, prog, S, update) {
   // cards are split k-of-n. Signing comes first, so the set of early cards stops growing before they are locked.
   const confirm = async () => {
     if (!allChecked) return toast(t('First check each trustee\'s key words with them.'), 'bad');
-    const roster = rosterToSign(raw, T.campaignId, T.keys); // every seat filled, and the founder's own seat is the founder's own keys
+    const roster = rosterToSign(raw, T.campaignId, T.keys, store.get(`plan.${T.campaignId}`)); // every seat filled, the founder's own seat is the founder's own keys, and k and n are the ones this device chose
     await tcall(T, 'POST /api/campaigns/:id/roster', { body: { roster, signature: C.signRoster(T.keys.signSecretKey, roster) } });
     if (prog.solo) await relock(roster.seats, roster.k);
     toast(prog.solo ? t('Done. The committee is confirmed and the early cards are locked to it: any {k} of {n} trustees are now needed to open them.', { k: raw.k, n: raw.n }) : t('Done. The committee is confirmed.'));
@@ -169,6 +169,7 @@ function committeeCard(raw, meta, prog, S, update) {
       S.slotLinks[x.index] ? trusteeInvite(S.slotLinks[x.index], nm(x.index), meta) : null))),
     complete && !confirmed && founder ? div(
       allChecked ? null : p({ class: 'small muted' }, t('First check each trustee\'s key words with them, above.')),
+      p(strong(t('You are signing this: any {k} of the {n} trustees together can open the cards.', { k: raw.k, n: raw.n })), ' ', t('If that is not what you chose, do not confirm.')),
       btn(prog.solo ? t('Confirm the committee and lock {n} early card(s)', { n: prog.solo }) : t('Confirm the committee'), act(confirm), { kind: 'primary', disabled: !allChecked })) : null,
     confirmed && status === 'ok' && prog.solo && founder ? btn(t('Lock {n} early card(s) to the committee', { n: prog.solo }), act(lockRest), { kind: 'primary' }) : null,
     confirmed && prog.solo && !founder ? p({ class: 'small muted' }, t('Only trustee 1 holds the keys to these cards, so trustee 1 does this step.')) : null,
@@ -177,7 +178,7 @@ function committeeCard(raw, meta, prog, S, update) {
       div({ class: 'row' },
         field(t('Trustees'), selectBox(Array.from({ length: 6 }, (_, i) => i + 2).filter((n) => n >= joined).map((n) => [String(n), String(n)]), String(P.n), (v) => { P.n = Number(v); P.k = Math.min(P.k, P.n); update(); })),
         field(t('Needed together'), selectBox(Array.from({ length: P.n - 1 }, (_, i) => i + 2).map((n) => [String(n), String(n)]), String(P.k), (v) => { P.k = Number(v); update(); }))),
-      btn(t('Save the plan'), act(async () => { await tcall(T, 'POST /api/campaigns/:id/committee', { body: { n: P.n, k: P.k } }); render(); }), { kind: 'secondary small' })) : null);
+      btn(t('Save the plan'), act(async () => { await tcall(T, 'POST /api/campaigns/:id/committee', { body: { n: P.n, k: P.k } }); store.set(`plan.${T.campaignId}`, { k: P.k, n: P.n }); render(); }), { kind: 'secondary small' })) : null);
 }
 
 // The lock: the number of confirmed cards below which the server will not hand the sealed cards to anyone.

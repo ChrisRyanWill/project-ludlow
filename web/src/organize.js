@@ -1,7 +1,7 @@
 // The organizing side: start a campaign, enroll trustees, sign a card, follow progress, keep a private record.
 // Every secret is created in this browser; the server is only ever given ciphertext and hashes.
 import * as C from '../../shared/crypto.js';
-import { authenticate, RosterError, isCommit } from '../../shared/roster.js';
+import { authenticate, checkEnrollment, RosterError, isCommit } from '../../shared/roster.js';
 import qrcode from 'qrcode-generator';
 import { api, bearer, ApiError, friendly } from './api.js';
 import { store } from './store.js';
@@ -135,6 +135,7 @@ export function StartPage() {
     };
     const box = C.encryptMeta(campaignKey, meta, id);
     await api('POST', '/api/campaigns', { body: { id, k: S.k, n: S.n, releaseMin: Number(S.release), metaCiphertext: box.ciphertext, metaNonce: box.nonce, templateVersion: 'card-v1', enrollTokenHashes: tokens.map(C.hashToken) } });
+    store.set(`plan.${id}`, { k: S.k, n: S.n }); // what the founder chose; the committee is only confirmed with these numbers (shared/roster.js)
     S.done = { meta, links: tokens.map((tok) => linkTo('/t', { e: tok, k: campaignKey, c: id })) };
   }
   const body = view((update) => {
@@ -215,6 +216,10 @@ export async function EnrollPage() {
     throw err;
   }
   const idx = raw.yourTrusteeIndex;
+  try { checkEnrollment(raw, idx, founderLink); } catch (err) { // the seat comes from the server: a trustee's link never opens the founder's seat, or names a different founder
+    if (!(err instanceof RosterError)) throw err;
+    return shell(div({ class: 'wrap' }, h1(t('This invitation does not check out')), callout('danger', t(friendly(err)))));
+  }
   const myName = meta.trusteeNames.find((x) => x.index === idx)?.displayName || '';
   const S = { pass: C.generatePassphrase(), own: false, made: null, saved: false, enrolled: null };
   return shell(div({ class: 'wrap' }, view((update) => {
