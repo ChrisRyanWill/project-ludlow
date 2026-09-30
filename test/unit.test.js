@@ -479,15 +479,16 @@ test('once the founder has signed the roster, a signer seals to that committee a
 
 test('the founder signs only a roster built from their own key and the committee they checked', () => {
   const w = rosterWorld(), F = w.ts[0].keys, evil = C.newKeypairs();
-  const built = rosterToSign(w.raw({ roster: null }), 'camp-1', F);
+  const P = { k: w.raw().k, n: w.raw().n };
+  const built = rosterToSign(w.raw({ roster: null }), 'camp-1', F, P);
   assert.ok(C.verifyRoster(F.signPublicKey, C.signRoster(F.signSecretKey, built), built));
   assert.deepEqual(built.seats.map((s) => s.boxPublicKey), w.ts.map((t) => t.keys.boxPublicKey));
-  refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed(2) }), 'camp-1', F), 'committee_incomplete'); // someone has not joined
+  refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed(2) }), 'camp-1', F, P), 'committee_incomplete'); // someone has not joined
   // the server puts a different key in the founder's own seat (which the founder did not check against anyone)
   for (const swap of [{ boxPublicKey: evil.boxPublicKey }, { signPublicKey: evil.signPublicKey }]) {
-    refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x, i) => (i === 0 ? { ...x, ...swap } : x)) }), 'camp-1', F), 'own_seat_mismatch');
+    refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x, i) => (i === 0 ? { ...x, ...swap } : x)) }), 'camp-1', F, P), 'own_seat_mismatch');
   }
-  refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x) => (x.index === 3 ? { ...x, boxPublicKey: 'short' } : x)) }), 'camp-1', F), 'committee_incomplete');
+  refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x) => (x.index === 3 ? { ...x, boxPublicKey: 'short' } : x)) }), 'camp-1', F, P), 'committee_incomplete');
 });
 
 test('the founder signs the threshold they chose, not one the server reports', () => {
@@ -495,7 +496,8 @@ test('the founder signs the threshold they chose, not one the server reports', (
   assert.equal(rosterToSign(w.raw({ roster: null }), 'camp-1', F, { k: 4, n: 5 }).k, 4);
   refuses(() => rosterToSign(w.raw({ roster: null, k: 2 }), 'camp-1', F, { k: 4, n: 5 }), 'plan_mismatch'); // the server lowered it
   refuses(() => rosterToSign(w.raw({ roster: null }), 'camp-1', F, { k: 3, n: 5 }), 'plan_mismatch');
-  assert.equal(rosterToSign(w.raw({ roster: null }), 'camp-1', F).k, 4); // no remembered plan (another device): the page shows the numbers instead
+  // no plan at all: the page never fills one in from the website's numbers; the founder types what they chose, from memory
+  for (const none of [undefined, null, {}, { k: 4 }, { k: '4', n: '5' }]) refuses(() => rosterToSign(w.raw({ roster: null }), 'camp-1', F, none), none === undefined || none === null ? 'plan_required' : 'plan_mismatch');
 });
 
 test('a trustee invitation cannot be turned into the founder\'s seat, or point at a different founder', () => {
@@ -647,7 +649,7 @@ test('translations: every Spanish entry belongs to an English sentence the app s
 
 test('what the roster check returns cannot be changed afterwards (keys are sealed only to what it vouched for)', () => {
   const w = rosterWorld(3, 2);
-  for (const a of [authenticate(w.raw(), w.commit, 'camp-1'), authenticate(w.raw({ roster: null }), w.commit, 'camp-1'), rosterToSign(w.raw({ roster: null }), 'camp-1', w.ts[0].keys)]) {
+  for (const a of [authenticate(w.raw(), w.commit, 'camp-1'), authenticate(w.raw({ roster: null }), w.commit, 'camp-1'), rosterToSign(w.raw({ roster: null }), 'camp-1', w.ts[0].keys, { k: w.raw().k, n: w.raw().n })]) {
     assert.throws(() => { a.seats = []; }, TypeError);
     assert.throws(() => { a.seats.push({ index: 9, boxPublicKey: 'x' }); }, TypeError);
     assert.throws(() => { a.seats[0].boxPublicKey = 'x'; }, TypeError);

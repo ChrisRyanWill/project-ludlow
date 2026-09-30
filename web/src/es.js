@@ -147,6 +147,7 @@ export default {
   'Only the founder (trustee 1) can do that.': 'Solo quien fundó la campaña (el custodio 1) puede hacer eso.',
   'This link is missing part of its key. Ask for it to be sent again and copy the whole link.': 'A este enlace le falta parte de su llave. Pide que te lo envíen de nuevo y copia el enlace completo.',
   'Not every trustee has joined yet.': 'Todavía no se han unido todos los custodios.',
+  'Type the number of trustees and the number needed together that you chose. Nothing was signed.': 'Escribe el número de custodios y el número que deben estar juntos que elegiste. No se firmó nada.',
   'The website says a different number of trustees, or a different number needed together, than you chose. Nothing was signed. Look at the plan again before you confirm: something may be wrong.': 'El sitio web indica un número de custodios, o un número necesario en conjunto, distinto del que elegiste. No se firmó nada. Revisa el plan otra vez antes de confirmar: puede que algo esté mal.',
   'This invitation is for a trustee, but the website put you in the founder\'s seat. Nothing was set up. Tell trustee 1 in person or by phone.': 'Esta invitación es para un custodio, pero el sitio web te puso en el lugar de quien fundó la campaña. No se configuró nada. Díselo al custodio 1 en persona o por teléfono.',
   'The website put a key in your own seat that is not yours. Do not confirm the committee: something is wrong. Tell the other trustees.': 'El sitio web puso en tu propio lugar una llave que no es tuya. No confirmes el comité: algo está mal. Avísales a los demás custodios.',
@@ -793,10 +794,11 @@ export default {
   'not in the checked log': 'no está en el registro comprobado',
   // a remembered plan that differs from the website's (first draft, needs a native reviewer: #10)
   'The plan does not match.': 'El plan no coincide.',
-  'This device remembers any {k} of {n} trustees, but the website says any {k2} of {n2}. If you did not change the plan yourself, do not confirm: tell the other trustees.': 'Este dispositivo recuerda {k} de {n} custodios, pero el sitio web dice {k2} de {n2}. Si tú no cambiaste el plan, no confirmes: avisa a los demás custodios.',
-  'If you changed it on another device, type the numbers you chose:': 'Si lo cambiaste en otro dispositivo, escribe los números que elegiste:',
-  'Use this plan': 'Usar este plan',
-  'Those are not the numbers the website shows. Nothing was changed.': 'Esos no son los números que muestra el sitio web. No se cambió nada.',
+  'Type the plan you chose.': 'Escribe el plan que elegiste.',
+  'This device remembers any {k} of {n} trustees, but the website shows a different plan. If you did not change the plan yourself, do not confirm: tell the other trustees.': 'Este dispositivo recuerda {k} de {n} custodios, pero el sitio web muestra otro plan. Si tú no cambiaste el plan, no confirmes: avisa a los demás custodios.',
+  'This device does not remember the plan you made. From memory, not from this page: how many trustees did you choose, and how many must be together to open the cards?': 'Este dispositivo no recuerda el plan que hiciste. De memoria, no de esta página: ¿cuántos custodios elegiste y cuántos deben estar juntos para abrir las tarjetas?',
+  'If you changed it on another device, type the numbers you chose. Confirming is refused if they are not the website\'s numbers.': 'Si lo cambiaste en otro dispositivo, escribe los números que elegiste. No se podrá confirmar si no son los números del sitio web.',
+  'Confirming is refused if they are not the website\'s numbers.': 'No se podrá confirmar si no son los números del sitio web.',
   // a case key that does not open (first draft, needs a native reviewer: #10)
   'The key you were given for this case does not open it. Remove it, so that the worker or a steward can share a working one with you.': 'La llave que te dieron para este caso no lo abre. Quítala para que el trabajador o un delegado pueda compartirte una que funcione.',
   'Remove my key': 'Quitar mi llave',

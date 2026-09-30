@@ -32,13 +32,15 @@ export function authenticate(raw, commit, campaignId) {
 
 // The founder's side: the roster to sign, built from the committee as the server lists it. The founder has checked each trustee's key words against
 // exactly these keys, and their own seat must be their own keys (a server could otherwise put a different key in the founder's seat).
-// `plan`, when this device remembers it, is the { k, n } the founder chose (when creating the campaign or saving a new plan): the server's k and n
-// must match it, so a server cannot have the founder sign a lower threshold than they meant. Key words cover the keys, not the numbers.
+// `plan` is the { k, n } the founder chose: remembered by this device (when creating the campaign or saving a new plan), or typed by the founder from
+// memory on another device. The server's k and n must match it, so a server cannot have the founder sign a lower threshold than they meant. Key words cover the keys, not the numbers.
 export function rosterToSign(raw, campaignId, ownKeys, plan) {
   const seats = Array.isArray(raw?.trustees) ? [...raw.trustees].sort((a, b) => a.index - b.index) : [];
   if (!seats.length || seats.length !== raw.n || seats.some((x, i) => x.index !== i + 1 || !x.enrolled || !isKey(x.boxPublicKey))) throw new RosterError('committee_incomplete');
   if (seats[0].boxPublicKey !== ownKeys.boxPublicKey || seats[0].signPublicKey !== ownKeys.signPublicKey) throw new RosterError('own_seat_mismatch');
-  if (plan && (plan.k !== raw.k || plan.n !== raw.n)) throw new RosterError('plan_mismatch');
+  // The founder's own numbers are required: remembered by the device that made the plan, or typed from memory. Never taken from the website.
+  if (plan === undefined || plan === null) throw new RosterError('plan_required');
+  if (plan.k !== raw.k || plan.n !== raw.n) throw new RosterError('plan_mismatch');
   const roster = { campaignId, k: raw.k, n: raw.n, seats: seats.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey })) };
   if (!rosterShapeOk(roster)) throw new RosterError('roster_invalid');
   return frozen(roster);

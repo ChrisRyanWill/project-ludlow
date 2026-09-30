@@ -301,25 +301,30 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
       await unlockDashboard(page, 1);
     }
     await page.getByText(/Everyone has joined. Now confirm the committee/).waitFor();
-    // This browser remembers the plan it made (2 of 3). If the website's numbers differ, the founder is warned and cannot sign until they type the
-    // numbers themselves (as someone who changed the plan on another device would).
+    // This browser remembers the plan it made (2 of 3). If the website's numbers differ, or this device has no plan, the founder must type the
+    // numbers they chose from memory: the page does not show the website's numbers there, and confirming is refused unless they match.
     await page.evaluate((id) => localStorage.setItem('ludlow.plan.' + id, JSON.stringify({ k: 3, n: 3 })), campaignId());
     await unlockDashboard(page, 1);
-    await page.getByText('The plan does not match.').waitFor();
     const planBox = page.locator('.callout', { hasText: 'The plan does not match.' });
-    await planBox.getByLabel('Needed together').fill('3'); await planBox.getByLabel('Trustees').fill('3');
-    await btn(planBox, 'Use this plan').click();
-    await page.getByText('Those are not the numbers the website shows. Nothing was changed.').waitFor();
-    await planBox.getByLabel('Needed together').fill('2');
-    await btn(planBox, 'Use this plan').click();
-    await page.getByText('The plan does not match.').waitFor({ state: 'detached' });
+    await planBox.waitFor();
+    assert.match(await planBox.innerText(), /remembers any 3 of 3 trustees/);
+    assert.doesNotMatch(await page.locator('.callout.danger, .callout.warn').allInnerTexts().then((a) => a.join(' ')), /\b2 of (the )?3\b/); // the website's plan is not printed next to the box
+    assert.equal(await page.getByText(/You are signing this/).count(), 0);
+    await page.evaluate((id) => localStorage.removeItem('ludlow.plan.' + id), campaignId()); // another device, which never saw the plan
+    await unlockDashboard(page, 1);
+    const typeBox = page.locator('.callout', { hasText: 'Type the plan you chose.' });
+    await typeBox.waitFor();
+    await typeBox.getByLabel('Needed together').fill('3'); await typeBox.getByLabel('Trustees').fill('3');
     // Confirming stays off until the founder has checked each trustee's key words with them. The words on the founder's screen come from the keys
     // the server holds, so they must equal what each trustee saw on their own screen.
     assert.equal(await btn(page, /Confirm the committee and lock \d+ early card/).isDisabled(), true);
     for (const idx of [2, 3]) await page.locator('.keycheck', { hasText: trustee[idx].words }).locator('input[type=checkbox]').check();
     await shot(page, '06c-key-words');
     assert.equal(await btn(page, /Confirm the committee and lock \d+ early card/).isDisabled(), false);
+    await btn(page, /Confirm the committee and lock \d+ early card/).click(); // with the wrong numbers (3 of 3): refused, nothing signed
+    await page.getByText(/The website says a different number of trustees/).waitFor();
     assert.equal(h.app.db.prepare('SELECT roster_json j FROM campaigns').get().j, null); // nothing is signed until the founder does it
+    await typeBox.getByLabel('Needed together').fill('2');
     await btn(page, /Confirm the committee and lock \d+ early card/).click();
     await page.getByText(/Done\. The committee is confirmed and the early cards are locked to it/).waitFor(); // the roster is signed and the re-lock has really finished
     await page.locator('.callout.ok', { hasText: 'Any 2 of 3 trustees together can open the cards.' }).waitFor();
