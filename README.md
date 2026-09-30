@@ -121,7 +121,7 @@ Project Ludlow is free software, licensed under the **GNU Affero General Public 
 | `ONLINE_OFFICER_ELECTIONS` | `false` | Needs attorney sign-off |
 | `SESSION_IDLE_HOURS`, `SESSION_MAX_DAYS` | `12`, `30` | Workspace sessions |
 | `RATE_STRICT_PER_MIN` | `90` | Sensitive-route limit per client per minute (a group signing on one Wi-Fi shares an IP) |
-| `TRUST_PROXY` | `0` | How many reverse proxies sit in front (1 for Caddy or nginx). The client IP is then read from the end of `X-Forwarded-For` (rate limiting only) |
+| `TRUST_PROXY` | `0` | How many reverse proxies sit in front (1 for Caddy or nginx; a whole number, anything else stops the server). The client IP is then read from the end of `X-Forwarded-For` (rate limiting only); no other header is trusted |
 | `MIN_VOTE_HOURS` | `24` | The shortest a vote may stay open, so members have time to see it |
 | `CONFIRMATIONS_PER_CAMPAIGN_PER_DAY` | `2000` | Caps the confirmation emails one campaign can make this server send |
 

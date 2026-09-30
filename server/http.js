@@ -113,7 +113,7 @@ export function clientIp(req, cfg) {
   const hops = cfg.trustProxy === true ? 1 : Number(cfg.trustProxy) || 0;
   if (hops > 0) {
     const parts = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
-    const fwd = req.headers['fly-client-ip'] || parts[parts.length - hops];
+    const fwd = parts[parts.length - hops]; // no vendor headers (Fly-Client-IP and the like): behind any other proxy they are whatever the client wrote
     if (fwd) return fwd;
   }
   return req.socket.remoteAddress || 'unknown';

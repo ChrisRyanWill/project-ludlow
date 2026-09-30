@@ -8,6 +8,7 @@ import { evaluateVote, complianceTasks } from '../shared/constants.js';
 import { makeLimiter } from '../server/rate.js';
 import { clientIp } from '../server/http.js';
 import { loadMasterKey } from '../server/kms.js';
+import { loadConfig } from '../server/config.js';
 import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -354,6 +355,13 @@ test('the client address comes from the proxy that is trusted, not from whatever
   assert.equal(clientIp(req('203.0.113.9'), { trustProxy: 1 }), '203.0.113.9');
   assert.equal(clientIp(req('6.6.6.6, 203.0.113.9, 10.1.1.1'), { trustProxy: 2 }), '203.0.113.9'); // two proxies
   assert.equal(clientIp(req('6.6.6.6'), { trustProxy: 0 }), '10.0.0.1'); // no proxy: the header means nothing
+  // A header only one hosting company's proxy sets is just client input behind any other proxy: it must never pick the address.
+  const flyReq = { headers: { 'fly-client-ip': '6.6.6.6', 'x-forwarded-for': '203.0.113.9' }, socket: { remoteAddress: '10.0.0.1' } };
+  assert.equal(clientIp(flyReq, { trustProxy: 1 }), '203.0.113.9');
+  assert.equal(clientIp(flyReq, { trustProxy: 0 }), '10.0.0.1');
+  assert.equal(loadConfig({}).trustProxy, 0);
+  assert.equal(loadConfig({ TRUST_PROXY: '1' }).trustProxy, 1);
+  for (const bad of ['true', 'yes', '-1', '1.5', 'x']) assert.throws(() => loadConfig({ TRUST_PROXY: bad }), /TRUST_PROXY/, bad);
   assert.equal(clientIp(req(null), { trustProxy: 1 }), '10.0.0.1');
   assert.equal(clientIp(req('1.1.1.1'), { trustProxy: 3 }), '10.0.0.1'); // fewer entries than proxies: the header was not set by them
   assert.equal(clientIp(req('6.6.6.6, 203.0.113.9'), { trustProxy: true }), '203.0.113.9'); // the old boolean setting still means one proxy
