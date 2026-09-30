@@ -314,6 +314,13 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     // Otherwise a creator could list "Keep dues as they are" first, or pick "plurality" so a unique "No" winner counts as "passed".
     if (s.type === 'recall') options = ['Remove from office', 'Keep in office'];
     if (FIXED_YES_NO.includes(s.type)) options = ['Yes', 'No'];
+    if (s.type === 'officer_election') { // the name on the ballot is the person who gets the role: the labels come from the candidates themselves
+      const ids = s.effect?.memberIds;
+      need(Array.isArray(ids) && ids.length >= 2 && ids.length <= 12 && ids.every(isUuid) && new Set(ids).size === ids.length);
+      const joined = (id) => db.prepare("SELECT membership_status s FROM ws_members WHERE id=? AND workspace_id=?").get(id, me.wsId)?.s === 'member';
+      if (!ids.every(joined)) fail(409, 'not_a_member'); // like a role given by an officer: only someone who has joined can hold one
+      options = ids.map((_, i) => `Candidate ${i + 1}`); // stored like this, since names are encrypted at rest; voteView shows each candidate's name
+    }
     need(options.length >= 2 && options.length <= 12 && options.every((o) => o && o.length <= 120));
     const passRule = s.type === 'officer_election' ? 'plurality'
       : EFFECT_TYPES.includes(s.type) || FIXED_YES_NO.includes(s.type) ? (['majority', 'two_thirds'].includes(s.passRule) ? s.passRule : 'majority')
@@ -327,11 +334,13 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     if (!v) fail(404, 'not_found');
     return v;
   }
+  // An election's options are its candidates, named from their (encrypted) member records when shown, so the label is always the person.
+  const optionsOf = (me, v) => (v.type === 'officer_election' && v.effect_json ? JSON.parse(v.effect_json).memberIds.map((id) => nameOf(me.dk, id) || '?') : JSON.parse(v.options_json));
   function voteView(me, v, detail) {
     const p = db.prepare('SELECT has_voted h FROM ws_vote_participation WHERE vote_id=? AND member_id=?').get(v.id, me.id);
     const t = db.prepare('SELECT COUNT(*) e, COALESCE(SUM(has_voted),0) v FROM ws_vote_participation WHERE vote_id=?').get(v.id);
     const out = {
-      id: v.id, title: v.title, description: v.description, type: v.type, options: JSON.parse(v.options_json), passRule: v.pass_rule, status: v.status,
+      id: v.id, title: v.title, description: v.description, type: v.type, options: optionsOf(me, v), passRule: v.pass_rule, status: v.status,
       closesAt: v.closes_at, createdAt: v.created_at, closedAt: v.closed_at, eligible: !!p, hasVoted: !!p?.h, turnout: { eligible: t.e, voted: t.v },
       effect: v.effect_json ? JSON.parse(v.effect_json) : null, results: v.results_json ? JSON.parse(v.results_json) : null, keyPublished: !!v.revealed_secret_key, petitionId: v.petition_id,
     };
@@ -435,7 +444,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     if (!JSON.parse(v.committee_json).some((c) => c.memberId === me.id)) fail(403, 'forbidden');
     if (v.status === 'open') fail(409, 'vote_open');
     return {
-      votePublicKey: v.vote_public_key, options: JSON.parse(v.options_json), passRule: v.pass_rule, thresholdK: v.threshold_k, committee: JSON.parse(v.committee_json), status: v.status,
+      votePublicKey: v.vote_public_key, options: optionsOf(me, v), passRule: v.pass_rule, thresholdK: v.threshold_k, committee: JSON.parse(v.committee_json), status: v.status,
       hasEffect: !!v.effect_json, // such a decision must be counted in the open: the ballot key has to be published so anyone can recount
       ballots: db.prepare('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=? ORDER BY id').all(v.id).map((r) => r.c),
     };
@@ -526,7 +535,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     const v = getVote(me, params.id);
     if (!v.revealed_secret_key) fail(409, 'key_not_published');
     return {
-      votePublicKey: v.vote_public_key, secretKey: v.revealed_secret_key, options: JSON.parse(v.options_json),
+      votePublicKey: v.vote_public_key, secretKey: v.revealed_secret_key, options: optionsOf(me, v),
       ballots: db.prepare('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=? ORDER BY id').all(v.id).map((r) => r.c),
       receiptHashes: db.prepare('SELECT receipt_hash h FROM ws_vote_receipts WHERE vote_id=? ORDER BY receipt_hash').all(v.id).map((r) => r.h),
     };
@@ -895,7 +904,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       bylawsVersions: all('SELECT version, summary, policy_json p, ratified_by_vote_id voteId, created_at at FROM ws_bylaws_versions WHERE workspace_id=? ORDER BY version', me.wsId).map((r) => ({ ...r, policy: JSON.parse(r.p), p: undefined })),
       announcements: all('SELECT title, body, created_at at FROM ws_announcements WHERE workspace_id=? ORDER BY created_at', me.wsId),
       votes: all('SELECT * FROM ws_votes WHERE workspace_id=? ORDER BY created_at', me.wsId).map((v) => ({
-        id: v.id, title: v.title, description: v.description, type: v.type, options: JSON.parse(v.options_json), passRule: v.pass_rule, status: v.status, closesAt: v.closes_at,
+        id: v.id, title: v.title, description: v.description, type: v.type, options: optionsOf(me, v), passRule: v.pass_rule, status: v.status, closesAt: v.closes_at,
         effect: v.effect_json ? JSON.parse(v.effect_json) : null, results: v.results_json ? JSON.parse(v.results_json) : null, revealedSecretKey: v.revealed_secret_key,
         // Ballots and receipts leave only once the vote is counted. While it is open, reading them as they arrive would isolate each ballot with its receipt.
         ...(v.status === 'tallied' ? { ballots: all('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=?', v.id).map((r) => r.c), receiptHashes: all('SELECT receipt_hash h FROM ws_vote_receipts WHERE vote_id=?', v.id).map((r) => r.h) } : { ballots: [], receiptHashes: [] }),

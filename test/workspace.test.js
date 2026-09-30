@@ -619,6 +619,22 @@ describe('workspace: officer elections (when the feature flag is on)', () => {
     assert.equal(res.json.effectApplied, 'role_grant');
     assert.ok((await ws.as(4, 'GET', '/api/ws/me')).json.roles.includes('steward'));
   });
+
+  it('the name on the ballot is the person who gets the role: labels come from the candidates, never from free text', async () => {
+    const ring = (await ws.as(0, 'GET', '/api/ws/keyring?role=election_committee')).json.holders.filter((x) => x.memberId !== ws.members[5].id);
+    const open = async (options, memberIds) => {
+      const vk = await C.newVoteKeys(ring, 2);
+      return ws.as(0, 'POST', '/api/ws/votes', { title: 'Elect a treasurer', type: 'officer_election', options, closesAt: new Date(Date.now() + 3600_000).toISOString(), votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: 2, effect: { kind: 'role_grant', role: 'treasurer', memberIds } });
+    };
+    // labels that say one thing while the ids say another
+    const r = await open(['Mona', 'Marco'], [ws.members[5].id, ws.members[4].id]);
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    const v = (await ws.as(0, 'GET', `/api/ws/votes/${r.json.voteId}`)).json;
+    assert.deepEqual(v.options, ['Marco Qqqmember', 'Mona Qqqmember']); // each option is its candidate's own name, in the same order as the ids
+    assert.deepEqual(JSON.parse(h.app.db.prepare('SELECT options_json o FROM ws_votes WHERE id=?').get(r.json.voteId).o), ['Candidate 1', 'Candidate 2']); // names stay encrypted at rest
+    assert.equal((await open(['A', 'B'], [ws.members[4].id, ws.members[4].id])).status, 400); // the same person twice
+    assert.equal((await open(['A', 'B'], [ws.members[4].id, ws.members[6].id])).json.error, 'not_a_member'); // Una has not joined the union
+  });
 });
 
 describe('workspace: money you can audit', () => {
