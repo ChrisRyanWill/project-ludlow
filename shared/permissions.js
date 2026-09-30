@@ -28,7 +28,7 @@ export const PERMS = {
   'vote.create': ['officer', 'election_committee'],
   'vote.cast': ['member'],
   'vote.close': ['officer', 'election_committee'],
-  'vote.tally': ['election_committee'],
+  'vote.tally': ['*'], // who counts a vote is fixed when it opens: the routes check the vote's own committee, so removing the role afterwards cannot stop the count
   'grievance.submit': ['*'],
   'grievance.list': ['*'],
   'grievance.assign': ['chief_steward'],

@@ -381,6 +381,48 @@ describe('workspace: one person cannot make up a result, or take power alone', (
   });
 });
 
+describe('workspace: a recall cannot be blocked or dodged by the person it targets', () => {
+  let h;
+  before(async () => { h = await startApp(); });
+  after(() => h.stop());
+  const team = (names) => makeWorkspace(h, names.map(([n, roles], i) => person(n, i, roles ? { roles } : {})));
+  const recallSpec = (ws, target, role = 'officer') => ({ title: 'Recall', type: 'recall', effect: { kind: 'role_revoke', memberId: ws.members[target].id, role } });
+
+  it('taking the committee\'s role away after the vote closes does not stop the count', async () => {
+    const ws = await team([['Solo Qqqofficer', ['officer']], ['Eve Qqqelect', ['election_committee']], ['Eli Qqqelect', ['election_committee']], ['Moe Qqqmember']]);
+    const vote = await openVote(ws, 1, recallSpec(ws, 0));
+    for (const i of [1, 2, 3]) await cast(ws, i, vote, 0); // remove
+    endVote(ws, vote.id);
+    for (const i of [1, 2]) await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[i].id, role: 'election_committee', op: 'remove' });
+    const res = await tally(ws, 1, vote, [1, 2]); // the people who hold the shares still count it
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.deepEqual([res.json.results.passed, res.json.effectApplied], [true, 'role_revoke']);
+    assert.ok(!(await ws.as(0, 'GET', '/api/ws/me')).json.roles.includes('officer'));
+    assert.equal((await ws.as(3, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).status, 403); // being on the vote's committee is what counts, not the role
+  });
+
+  it('stepping down just before the count does not let the role be handed back afterwards', async () => {
+    const ws = await team([['Tara Qqqofficer', ['officer']], ['Alan Qqqofficer', ['officer']], ['Eve Qqqelect', ['election_committee']], ['Eli Qqqelect', ['election_committee']], ['Moe Qqqmember'], ['Max Qqqmember']]);
+    const vote = await openVote(ws, 2, recallSpec(ws, 0));
+    for (const i of [2, 3, 4, 5]) await cast(ws, i, vote, 0);
+    endVote(ws, vote.id);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[0].id, role: 'officer', op: 'remove' })).status, 200);
+    const res = await tally(ws, 2, vote, [2, 3]);
+    assert.deepEqual([res.json.results.passed, res.json.effectApplied], [true, 'role_revoke']);
+    const back = await ws.as(1, 'POST', '/api/ws/roles', { memberId: ws.members[0].id, role: 'officer', op: 'add' });
+    assert.equal(back.json.error, 'removed_by_vote');
+  });
+
+  it('a ratification or strike vote cannot be worded or ruled so that "No" passes', async () => {
+    const ws = await team([['Olga Qqqofficer', ['officer']], ['Eve Qqqelect', ['election_committee']], ['Eli Qqqelect', ['election_committee']], ['Moe Qqqmember']]);
+    for (const type of ['ratification', 'strike_authorization']) {
+      const v = await openVote(ws, 0, { title: 'Question', type, options: ['Reject the contract', 'Accept it', 'Undecided'], passRule: 'plurality' });
+      assert.deepEqual([v.options, v.passRule], [['Yes', 'No'], 'majority'], type);
+      assert.equal((await openVote(ws, 0, { title: 'Question', type, passRule: 'two_thirds' })).passRule, 'two_thirds');
+    }
+  });
+});
+
 describe('workspace: the order people voted in is not left on disk', () => {
   let h, ws;
   const BIG = Array.from({ length: 20 }, (_, i) => person(`Voter${i} Qqqperson`, i, i === 0 ? { roles: ['officer', 'election_committee'] } : i < 3 ? { roles: ['election_committee'] } : {}));

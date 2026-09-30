@@ -286,6 +286,8 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   // A vote can carry an "effect" that the server applies itself when the vote passes: nobody has to
   // remember to implement the members' decision, and nobody can quietly skip it.
   const EFFECT_TYPES = ['dues_change', 'bylaws_amendment', 'recall', 'officer_election'];
+  // Questions whose answer is Yes or No and too weighty to word loosely: "passed" must always mean a majority (or two thirds) said Yes.
+  const FIXED_YES_NO = ['dues_change', 'bylaws_amendment', 'ratification', 'strike_authorization'];
   function validateEffect(me, type, e, options) {
     const memberOk = (id) => isUuid(id) && db.prepare('SELECT 1 FROM ws_members WHERE id=? AND workspace_id=?').get(id, me.wsId);
     if (type === 'dues_change') { need(e?.kind === 'dues' && isStr(e.name, 80) && int(e.amountCents, 0, 100_000_000)); return { kind: 'dues', name: e.name.trim(), amountCents: e.amountCents }; }
@@ -308,10 +310,10 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     // A vote that carries out its own decision must mean the same thing whoever wrote it: option 0 is the action, and the rule looks at option 0.
     // Otherwise a creator could list "Keep dues as they are" first, or pick "plurality" so a unique "No" winner counts as "passed".
     if (s.type === 'recall') options = ['Remove from office', 'Keep in office'];
-    if (s.type === 'dues_change' || s.type === 'bylaws_amendment') options = ['Yes', 'No'];
+    if (FIXED_YES_NO.includes(s.type)) options = ['Yes', 'No'];
     need(options.length >= 2 && options.length <= 12 && options.every((o) => o && o.length <= 120));
     const passRule = s.type === 'officer_election' ? 'plurality'
-      : EFFECT_TYPES.includes(s.type) ? (['majority', 'two_thirds'].includes(s.passRule) ? s.passRule : 'majority')
+      : EFFECT_TYPES.includes(s.type) || FIXED_YES_NO.includes(s.type) ? (['majority', 'two_thirds'].includes(s.passRule) ? s.passRule : 'majority')
         : PASS_RULES.includes(s.passRule) ? s.passRule : 'majority';
     return { title: s.title.trim(), description: optStr(s.description, 2000), type: s.type, options, passRule, effect: validateEffect(me, s.type, s.effect, options) };
   }
@@ -427,8 +429,8 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
 
   W('GET', '/api/ws/votes/:id/tally-bundle', 'vote.tally', ({ me, params }) => {
     const v = getVote(me, params.id);
-    if (v.status === 'open') fail(409, 'vote_open');
     if (!JSON.parse(v.committee_json).some((c) => c.memberId === me.id)) fail(403, 'forbidden');
+    if (v.status === 'open') fail(409, 'vote_open');
     return {
       votePublicKey: v.vote_public_key, options: JSON.parse(v.options_json), passRule: v.pass_rule, thresholdK: v.threshold_k, committee: JSON.parse(v.committee_json), status: v.status,
       hasEffect: !!v.effect_json, // such a decision must be counted in the open: the ballot key has to be published so anyone can recount
@@ -453,7 +455,9 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       return 'policy';
     }
     if (e.kind === 'role_revoke' && res.passed) {
-      db.prepare('UPDATE ws_roles SET removed_at=?, removed_by_vote_id=? WHERE member_id=? AND role=? AND removed_at IS NULL').run(t, v.id, e.memberId, e.role); // remembered, so an officer cannot quietly give the role back
+      // Remembered, so an officer cannot quietly give the role back. Also when the person stepped down before the count: otherwise stepping down
+      // would leave no mark, and the role could be handed straight back.
+      db.prepare('UPDATE ws_roles SET removed_at=COALESCE(removed_at, ?), removed_by_vote_id=? WHERE member_id=? AND role=?').run(t, v.id, e.memberId, e.role);
       audit(me.wsId, me.id, `recall.applied:${e.role}`, 'member', e.memberId);
       return 'role_revoke';
     }
@@ -468,9 +472,9 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
 
   W('POST', '/api/ws/votes/:id/results', 'vote.tally', ({ me, params, body: b }) => {
     const v = getVote(me, params.id);
+    if (!JSON.parse(v.committee_json).some((c) => c.memberId === me.id)) fail(403, 'forbidden');
     if (v.status === 'open') fail(409, 'vote_open');
     if (v.status === 'tallied') fail(409, 'already_tallied');
-    if (!JSON.parse(v.committee_json).some((c) => c.memberId === me.id)) fail(403, 'forbidden');
     const options = JSON.parse(v.options_json);
     const ballots = db.prepare('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=? ORDER BY id').all(v.id).map((r) => r.c);
     // Every ballot came from a member who voted, and each has a receipt. A different number means something was added or removed outside the

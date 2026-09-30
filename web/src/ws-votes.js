@@ -16,7 +16,8 @@ const TYPE_NAMES = {
 };
 const PASS_NAMES = { majority: 'A majority of votes cast', two_thirds: 'Two thirds of votes cast', plurality: 'The option with the most votes' };
 const dollars = (v) => Math.round(Number(v) * 100);
-const EFFECT_TYPES = ['dues_change', 'bylaws_amendment', 'recall']; // decisions the server carries out itself: option 0 is the action, so "plurality" makes no sense
+// Decisions the server carries out itself, and the weighty Yes/No questions: their options are fixed (option 0 is the action), so "plurality" makes no sense.
+const FIXED_TYPES = ['dues_change', 'bylaws_amendment', 'recall', 'ratification', 'strike_authorization'];
 
 const effectText = (e) => {
   if (!e) return null;
@@ -56,12 +57,12 @@ function voteForm({ mode, roles, onDone, prefill = {} }) {
       mode === 'petition' ? p({ class: 'small muted' }, t('If enough members sign, the election committee must open this vote exactly as you write it.')) : null,
       field(t('What are members deciding?'), textInput({ value: F.title, oninput: (e) => (F.title = e.target.value) })),
       field(t('Explain it (optional)'), textarea({ rows: 3, value: F.description, oninput: (e) => (F.description = e.target.value) })),
-      field(t('Kind of decision'), selectBox(typeOptions, F.type, (v) => { F.type = v; if (EFFECT_TYPES.includes(v) && F.passRule === 'plurality') F.passRule = 'majority'; update(); })),
+      field(t('Kind of decision'), selectBox(typeOptions, F.type, (v) => { F.type = v; if (FIXED_TYPES.includes(v) && F.passRule === 'plurality') F.passRule = 'majority'; update(); })),
       F.type === 'dues_change' ? div({ class: 'row' }, field(t('Name of the dues plan'), textInput({ value: F.dues, oninput: (e) => (F.dues = e.target.value) })), field(t('Amount per month'), textInput({ type: 'number', min: 0, step: '0.01', value: F.amount, oninput: (e) => (F.amount = e.target.value) }))) : null,
       F.type === 'bylaws_amendment' ? div({ class: 'row' }, field(t('Rule to change'), selectBox(Object.entries(POLICY_FIELDS).map(([k, f]) => [k, t(f.label)]), F.key, (v) => { F.key = v; update(); })), field(t('New value'), textInput({ type: 'number', min: 0, value: F.value, oninput: (e) => (F.value = e.target.value) }))) : null,
       F.type === 'recall' ? field(t('Who and which role?'), selectBox(roles.map((r) => [`${r.memberId}|${r.role}`, `${r.name}: ${r.role}`]), F.target, (v) => (F.target = v))) : null,
-      !['dues_change', 'bylaws_amendment', 'recall'].includes(F.type) ? field(t('Choices (one per line, the first is "Yes")'), textarea({ rows: 3, value: F.options, oninput: (e) => (F.options = e.target.value) })) : null,
-      field(t('It passes with'), selectBox(Object.entries(PASS_NAMES).filter(([k]) => k !== 'plurality' || !EFFECT_TYPES.includes(F.type)).map(([k, v]) => [k, t(v)]), F.passRule, (v) => (F.passRule = v))),
+      !FIXED_TYPES.includes(F.type) ? field(t('Choices (one per line, the first is "Yes")'), textarea({ rows: 3, value: F.options, oninput: (e) => (F.options = e.target.value) })) : null,
+      field(t('It passes with'), selectBox(Object.entries(PASS_NAMES).filter(([k]) => k !== 'plurality' || !FIXED_TYPES.includes(F.type)).map(([k, v]) => [k, t(v)]), F.passRule, (v) => (F.passRule = v))),
       mode === 'vote' ? field(t('Voting stays open for (days)'), textInput({ type: 'number', min: 1, max: 60, value: F.days, oninput: (e) => (F.days = Number(e.target.value) || 7) })) : null,
       div({ class: 'row' }, btn(mode === 'petition' ? t('Start the petition') : t('Open the vote'), act(submit), { kind: 'primary' }), btn(t('Cancel'), onDone, { kind: 'secondary' })));
   });
