@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { zip, crc32, csvCell, toCsv } from '../web/src/zip.js';
-import { verifyChain, auditFields, checkPinned } from '../shared/verify.js';
+import { verifyChain, auditFields, checkPinned, cardTextMatches } from '../shared/verify.js';
 import { authenticate, rosterToSign, checkMySeat, checkEnrollment, RosterError } from '../shared/roster.js';
 
 await C.ready;
@@ -604,4 +604,12 @@ test('the database never runs in WAL mode, where one commit would put a voter\'s
   const pre = new Database(file); pre.pragma('journal_mode = WAL'); pre.close(); // a file someone switched to WAL, say with the sqlite3 shell
   const db = openDb(file);
   try { assert.equal(db.pragma('journal_mode', { simple: true }), 'delete'); } finally { db.close(); }
+});
+
+test('an opened card whose text does not match its own fingerprint is flagged, not trusted', () => {
+  const cardText = 'I authorize the union to represent me.';
+  assert.equal(cardTextMatches({ cardText, cardTextSha256: C.sha256Hex(cardText) }), true);
+  assert.equal(cardTextMatches({ cardText: cardText + ' Only for an election.', cardTextSha256: C.sha256Hex(cardText) }), false); // text changed after hashing
+  assert.equal(cardTextMatches({ cardText, cardTextSha256: C.sha256Hex(cardText).toUpperCase() }), true); // hex case is not a difference
+  for (const bad of [{ cardText }, { cardTextSha256: C.sha256Hex(cardText) }, {}, null]) assert.equal(cardTextMatches(bad), false);
 });

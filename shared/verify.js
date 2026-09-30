@@ -1,7 +1,13 @@
 // Tamper-evidence any member's browser can check on its own. Every ledger and audit entry commits to
 // the one before it (hash chain), so history cannot be rewritten without every later hash changing.
 // The server publishes the chain; the client re-derives every hash and compares.
-import { chainHash, GENESIS } from './crypto.js';
+import { chainHash, GENESIS, sha256Hex } from './crypto.js';
+
+// A card carries the SHA-256 of the exact text the signer saw. When the trustees open it, the text must still match: a card that does not was
+// made by altered code (or has a bug), and is flagged rather than trusted. (The encryption already stops anyone else changing it.)
+export function cardTextMatches(payload) {
+  return typeof payload?.cardText === 'string' && typeof payload.cardTextSha256 === 'string' && sha256Hex(payload.cardText) === payload.cardTextSha256.toLowerCase();
+}
 
 export const ledgerFields = (e) => ({ seq: e.seq, date: e.date, kind: e.kind, cents: e.cents, cat: e.cat, rev: e.rev, at: e.at, commit: e.commit });
 export const auditFields = (e) => ({ seq: e.seq, actor: e.actorId, action: e.action, type: e.type, id: e.id, at: e.at });

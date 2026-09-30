@@ -3,6 +3,7 @@ import * as C from '../../shared/crypto.js';
 import { api, tcall, friendly } from './api.js';
 import { authenticate, checkMySeat, rosterToSign, RosterError, isCommit } from '../../shared/roster.js';
 import { store } from './store.js';
+import { cardTextMatches } from '../../shared/verify.js';
 import { t } from './i18n.js';
 import { packOf, markersFor } from './packs.js';
 import { buildPackage } from './exportpkg.js';
@@ -298,13 +299,14 @@ export async function UnlockPage() {
     const emails = new Map(), phones = new Map();
     for (const c of U.cards) { const e = c.payload.personalEmail.toLowerCase(), p = c.payload.phone.replace(/\D/g, ''); emails.set(e, (emails.get(e) || 0) + 1); phones.set(p, (phones.get(p) || 0) + 1); }
     const dupes = [...emails.values(), ...phones.values()].filter((n) => n > 1).length;
+    const textMismatch = U.cards.filter((c) => !cardTextMatches(c.payload)).length; // made by altered code, or a bug: check these by hand
     const size = U.meta.estimatedUnitSize, pctOf = Math.round((use.length / size) * 100);
     return div(
       h1(t('The cards are open')),
       callout('warn', t('The names are now readable on this screen. Do not leave this page open on a shared device.')),
       div({ class: 'card' }, h2(t('Summary')),
         ul(li(strong(U.cards.length), ' ', t('cards opened')), li(strong(use.length), ' ', t('will be in the package ({p}% of about {size})', { p: pctOf, size })),
-          li(strong(disavowed), ' ', t('disavowed by the signer (excluded unless you include them)')), li(strong(noConfirm), ' ', t('without a confirmation email sent')), li(strong(dupes), ' ', t('possible duplicate emails or phone numbers to check by hand'))),
+          li(strong(disavowed), ' ', t('disavowed by the signer (excluded unless you include them)')), li(strong(noConfirm), ' ', t('without a confirmation email sent')), li(strong(dupes), ' ', t('possible duplicate emails or phone numbers to check by hand')), textMismatch ? li(strong(textMismatch), ' ', t('whose card text does not match its fingerprint (marked in the package; check them by hand)')) : null),
         U.failed.length ? callout('danger', t('{n} card(s) could not be opened. Check that the right key files were used, or that the card was not damaged.', { n: U.failed.length })) : null,
         use.length * 2 <= size ? callout('warn', t('This is not yet a majority. The letter in the package will say so and should not be sent as written.')) : null,
         label3(t('Include disavowed cards (marked) for review'), U.include, (v) => { U.include = v; update(); })),
