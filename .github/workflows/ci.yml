@@ -17,8 +17,8 @@ jobs:
       matrix:
         node: [20, 22]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -30,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           cache: npm
@@ -39,3 +39,22 @@ jobs:
       - run: npx playwright-core install --with-deps chromium
       - run: npm run test:e2e
       - run: npm run test:site
+  reproducible:
+    name: Reproducible build (local and Docker app.js match)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Build the Docker image's build stage and compare app.js
+        run: |
+          docker build --target build -t ludlow-build .
+          local=$(sha256sum web/dist/app.js | cut -d' ' -f1)
+          image=$(docker run --rm ludlow-build sha256sum web/dist/app.js | cut -d' ' -f1)
+          echo "local  $local"; echo "docker $image"
+          test "$local" = "$image"
