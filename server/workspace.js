@@ -859,13 +859,18 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   });
 
   // ---------- transparency ----------
-  W('GET', '/api/ws/audit', 'audit.read_all', ({ me }) => {
+  // Shows a page of 500 entries, newest first (?before=seq for older ones), and always sends the whole chain without names, so the officer's
+  // browser checks every entry from the first one, not only the page it shows (#41).
+  W('GET', '/api/ws/audit', 'audit.read_all', ({ me, query }) => {
     const rows = db.prepare('SELECT * FROM ws_audit WHERE workspace_id=? ORDER BY seq').all(me.wsId);
     const names = new Map();
     const nm = (id) => (id ? (names.has(id) ? names.get(id) : (names.set(id, nameOf(me.dk, id)), names.get(id))) : null);
+    const before = /^\d{1,12}$/.test(query.before || '') ? Number(query.before) : Infinity;
+    const fields = (r) => ({ seq: r.seq, actorId: r.actor_member_id, action: r.action, type: r.resource_type, id: r.resource_id, at: r.created_at, prevHash: r.prev_hash, hash: r.hash });
     return {
       genesis: GENESIS,
-      entries: rows.map((r) => ({ seq: r.seq, actorId: r.actor_member_id, actor: nm(r.actor_member_id), action: r.action, type: r.resource_type, id: r.resource_id, at: r.created_at, prevHash: r.prev_hash, hash: r.hash })).reverse().slice(0, 500),
+      entries: rows.filter((r) => r.seq < before).reverse().slice(0, 500).map((r) => ({ ...fields(r), actor: nm(r.actor_member_id) })),
+      chain: rows.map(fields),
       head: rows.at(-1) ? { seq: rows.at(-1).seq, hash: rows.at(-1).hash } : null,
     };
   });

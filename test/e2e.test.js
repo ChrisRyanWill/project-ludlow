@@ -520,6 +520,10 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
     await alice.getByText(/Checked in your browser: all 1 ledger entries/).waitFor();
     await alice.getByText(/The payee and note of 1 entries match what was recorded/).waitFor(); // and who was paid, not only how much
     await alice.getByText('$120.50').first().waitFor();
+    // an officer's browser checks the whole audit log, from the first entry
+    await nav(alice, 'Union');
+    await alice.locator('summary', { hasText: 'Audit log' }).click();
+    await alice.getByText(/all \d+ entries form an unbroken chain from the first/).waitFor();
     assert.deepEqual(problems, []);
   });
 

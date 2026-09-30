@@ -433,6 +433,29 @@ describe('workspace: members can check who was paid, not only how much (#41)', (
   });
 });
 
+describe('workspace: the whole audit log is checked, not only the newest page (#41)', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('an officer gets every entry\'s hash to check from the very first, and can page back through the entries', async () => {
+    for (let i = 0; i < 80; i++) await ws.as(0, 'GET', '/api/ws/roster'); // each view writes one entry per person: 560 entries
+    const a = (await ws.as(0, 'GET', '/api/ws/audit')).json;
+    const total = h.app.db.prepare('SELECT COUNT(*) c FROM ws_audit WHERE workspace_id=?').get(ws.wsId).c;
+    assert.ok(total > 500);
+    assert.equal(a.entries.length, 500); // the page shown
+    assert.equal(a.chain.length, total); // what is checked: everything
+    assert.equal(verifyChain(a.chain, auditFields, { anchored: true }).ok, true);
+    const older = (await ws.as(0, 'GET', `/api/ws/audit?before=${a.entries.at(-1).seq}`)).json.entries;
+    assert.equal(older.length, total - 500);
+    assert.equal(older[0].seq, a.entries.at(-1).seq - 1);
+    // a rewritten early entry, out of sight of the first page, is caught
+    h.app.db.exec('DROP TRIGGER IF EXISTS ws_audit_no_update');
+    h.app.db.prepare("UPDATE ws_audit SET action='member.pii.read.x' WHERE workspace_id=? AND seq=2").run(ws.wsId);
+    assert.equal(verifyChain((await ws.as(0, 'GET', '/api/ws/audit')).json.chain, auditFields, { anchored: true }).ok, false);
+  });
+});
+
 describe('workspace: a recall cannot be blocked or dodged by the person it targets', () => {
   let h;
   before(async () => { h = await startApp(); });

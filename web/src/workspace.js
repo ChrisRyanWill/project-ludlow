@@ -153,9 +153,10 @@ export const UnionTab = async () => {
   const audit = can('audit.read_all') ? await wcall('GET', '/api/ws/audit') : null;
   const comp = can('compliance.read') ? (await wcall('GET', '/api/ws/compliance')).tasks : null;
   const me = WS.info.member;
+  const shown = audit ? audit.entries.slice(0, 100) : []; // entries listed on screen, newest first; more on request
   const S = { role: 'steward', who: roster?.[0]?.id, csv: '', claims: null, phone: me.phone || '', address: me.address || '', job: me.jobTitle || '', shift: me.shift || '' };
-  const auditList = audit ? [...audit.entries].reverse() : null;
-  const chain = audit ? verifyChain(auditList, auditFields, { anchored: audit.entries.length < 500 }) : null;
+  const auditList = audit ? audit.chain : null; // every entry since the first, oldest first: the whole log is checked, not only the page shown
+  const chain = audit ? verifyChain(auditList, auditFields, { anchored: true }) : null;
   // Like the ledger, this device remembers the newest audit entry it has seen, so a rewritten log (which a chain check alone cannot notice) is caught on a later visit.
   const auditPinKey = `pin.audit.${WS.workspaceId}`, auditPin = store.get(auditPinKey);
   const auditPinned = chain?.ok ? checkPinned(auditList, auditPin) : { ok: false };
@@ -199,7 +200,11 @@ export const UnionTab = async () => {
     audit ? details({ class: 'card' }, summary(t('Audit log')),
       !chain.ok ? callout('danger', t('The audit log has been tampered with near entry {n}. Do not trust it.', { n: chain.brokenAt }))
         : !auditPinned.ok ? callout('danger', strong(t('The history changed.')), ' ', t('On an earlier visit this device saw audit entries that are now different or missing. Someone may have rewritten the log. Tell your members right away.'))
-          : auditPinned.first ? callout('info', t('Checked in your browser: {n} recent entries form an unbroken chain. This is the first check on this device, so it cannot yet tell whether older entries were removed. Later visits will.', { n: chain.count }))
-            : callout('ok', t('Checked in your browser: {n} recent entries form an unbroken chain, and entries this device saw before have not changed.', { n: chain.count })),
-      div({ class: 'table-wrap' }, table({ class: 'table small' }, thead(tr(th('#'), th(t('Who')), th(t('What')), th(t('When')))), tbody(audit.entries.slice(0, 100).map((e) => tr(td(e.seq), td(e.actor || '—'), td(e.action), td(ago(e.at)))))))) : null)));
+          : auditPinned.first ? callout('info', t('Checked in your browser: all {n} entries form an unbroken chain from the first. This is the first check on this device, so it cannot yet tell whether entries were rewritten before today. Later visits will.', { n: chain.count }))
+            : callout('ok', t('Checked in your browser: all {n} entries form an unbroken chain from the first, and entries this device saw before have not changed.', { n: chain.count })),
+      div({ class: 'table-wrap' }, table({ class: 'table small' }, thead(tr(th('#'), th(t('Who')), th(t('What')), th(t('When')))), tbody(shown.map((e) => tr(td(e.seq), td(e.actor || '—'), td(e.action), td(ago(e.at)))))),
+        shown.length && shown.at(-1).seq > 1 ? btn(t('Show older entries'), act(async () => {
+          const more = shown.length < audit.entries.length ? audit.entries.slice(shown.length, shown.length + 100) : (await wcall('GET', `/api/ws/audit?before=${shown.at(-1).seq}`)).entries.slice(0, 100);
+          shown.push(...more); update();
+        }), { kind: 'secondary small' }) : null)) : null)));
 };
