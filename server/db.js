@@ -11,11 +11,22 @@ export function openDb(file) {
   const db = new Database(file);
   db.pragma('foreign_keys = ON');
   db.pragma('secure_delete = ON'); // deleted rows (a withdrawn card, a destroyed campaign) are zeroed on disk
+  // Without this, INSERT OR REPLACE deletes the row it replaces WITHOUT firing the delete triggers, so a code path using it could rewrite the ledger
+  // and the audit log past the "append-only" guards below. It is set per connection: it guards this application's own SQL. Someone who can write the
+  // file directly can drop the triggers; the hash chains and the pins on members' devices are what catch that.
+  db.pragma('recursive_triggers = ON');
+  // The rollback journal, never WAL: in WAL mode each commit appends its pages to the log in order, so the cast that marks a member as having voted
+  // and the ballot it stores would sit side by side in one frame set. Pinned here so a file someone switched to WAL is switched back.
+  db.pragma('journal_mode = DELETE');
   db.exec(SCHEMA);
   // Migrations for databases created by earlier versions.
   const cardCols = db.prepare("SELECT name FROM pragma_table_info('cards')").all().map((c) => c.name);
   const campCols = db.prepare("SELECT name FROM pragma_table_info('campaigns')").all().map((c) => c.name);
+  const roleCols = db.prepare("SELECT name FROM pragma_table_info('ws_roles')").all().map((c) => c.name);
+  if (!roleCols.includes('removed_by_vote_id')) db.exec('ALTER TABLE ws_roles ADD COLUMN removed_by_vote_id TEXT');
   if (!campCols.includes('release_min')) db.exec('ALTER TABLE campaigns ADD COLUMN release_min INTEGER NOT NULL DEFAULT 1');
+  if (!campCols.includes('roster_json')) db.exec('ALTER TABLE campaigns ADD COLUMN roster_json TEXT');
+  if (!campCols.includes('roster_sig')) db.exec('ALTER TABLE campaigns ADD COLUMN roster_sig TEXT');
   if (!cardCols.includes('seal_mode')) db.exec("ALTER TABLE cards ADD COLUMN seal_mode TEXT NOT NULL DEFAULT 'shamir'");
   // A campaign is live as soon as its founder (trustee 1) has a key; it used to wait for every trustee.
   db.exec(`UPDATE campaigns SET status='active' WHERE status='draft' AND EXISTS
@@ -24,6 +35,9 @@ export function openDb(file) {
 }
 
 export const SCHEMA = `
+-- One-time steps that must never run again (for example a re-encryption that would otherwise accept values pasted in later).
+CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
 -- ================= Campaign system (zero-knowledge) =================
 CREATE TABLE IF NOT EXISTS campaigns (
   id TEXT PRIMARY KEY,
@@ -31,6 +45,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   threshold_k INTEGER NOT NULL, trustee_count_n INTEGER NOT NULL,
   meta_ciphertext TEXT NOT NULL, meta_nonce TEXT NOT NULL, card_template_version TEXT NOT NULL,
   release_min INTEGER NOT NULL DEFAULT 1, -- the server will not hand over the sealed cards until this many are signed and vouched
+  roster_json TEXT, roster_sig TEXT, -- the committee as the founder signed it (docs/PROTOCOL.md 1a). Until it exists, cards are sealed to the founder alone
   created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
   CHECK (threshold_k >= 2 AND threshold_k <= trustee_count_n AND trustee_count_n <= 7)
 );
@@ -116,7 +131,7 @@ CREATE TABLE IF NOT EXISTS ws_members (
 CREATE INDEX IF NOT EXISTS ws_members_ws ON ws_members(workspace_id);
 CREATE TABLE IF NOT EXISTS ws_roles (
   member_id TEXT NOT NULL REFERENCES ws_members(id) ON DELETE CASCADE,
-  role TEXT NOT NULL, assigned_by TEXT, assigned_at TEXT NOT NULL, removed_at TEXT,
+  role TEXT NOT NULL, assigned_by TEXT, assigned_at TEXT NOT NULL, removed_at TEXT, removed_by_vote_id TEXT,
   PRIMARY KEY (member_id, role)
 );
 CREATE TABLE IF NOT EXISTS ws_sessions (
@@ -124,8 +139,8 @@ CREATE TABLE IF NOT EXISTS ws_sessions (
   member_id TEXT NOT NULL REFERENCES ws_members(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
 );
--- Append-only and hash-chained: each entry commits to the one before it, so history cannot be
--- quietly rewritten, not even by whoever runs the database.
+-- Append-only and hash-chained: each entry commits to the one before it. The triggers stop this application's own SQL from changing it;
+-- someone who edits the file directly can, but not quietly: the chain breaks and devices that pinned a later entry notice.
 CREATE TABLE IF NOT EXISTS ws_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   workspace_id TEXT NOT NULL, seq INTEGER NOT NULL,

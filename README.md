@@ -16,7 +16,7 @@
 
 Project Ludlow is an open-source platform that takes a group of workers from "we should organize" to "we run our own union", in two halves:
 
-1. **Organize.** Coworkers sign electronic authorization cards on their own phones. Each card is encrypted *in the browser* with a key split among a few trusted trustees, so **no one, not even the server, can read a card** until `k` of `n` trustees open them together. Cards from group links only count once a coworker confirms the signer in person. When the committee decides to go public, the browser builds the filing package locally: roster, cards, declaration, letters, worksheets.
+1. **Organize.** Coworkers sign electronic authorization cards on their own phones. Each card is encrypted *in the browser* with a key split among a few trusted trustees, so the server stores only ciphertext (it handles a signer's details once, to send the legally required confirmation email, then discards them) and, once the founder has confirmed the full committee, **no one person can read a card**: it takes `k` of `n` trustees together. (Honest caveats: until the founder has confirmed the committee, the founder holds the only key; a signer's browser checks the trustees' keys against the founder's key check in their invitation, so it trusts the founder and whoever gave them the link; and the same protection for the workspace's grievance and vote keys is not built yet. See the [threat model](docs/THREAT_MODEL.md).) Cards from group links only count once a coworker confirms the signer in person. When the committee decides to go public, the browser builds the filing package locally: roster, cards, declaration, letters, worksheets.
 2. **Run.** Once the union is public it gets a workspace with secret-ballot votes, workplace cases, money, rules and deadlines, all built so that **every member can check the work**, not just trust the officers.
 
 > Nothing here files anything, contacts an employer, or talks to an agency. It prepares drafts for people. Every legal text carries `DRAFT — REQUIRES REVIEW BY A LICENSED LABOR ATTORNEY`.
@@ -29,31 +29,31 @@ npm start          # builds the web app, serves http://localhost:8787   (Node 20
 npm test           # unit + API tests, and a real-Chromium run through the whole product
 ```
 
-Data lives in `./data/ludlow.db` (one SQLite file). In development the confirmation emails go to an in-memory outbox at `/dev/outbox`. You can also try the core idea, sealing a card among trustees, on the [live page](https://chrisryanwill.github.io/project-ludlow/#try) without installing anything.
+Data lives in `./data/ludlow.db` (one SQLite file). In development the confirmation emails go to an in-memory outbox at `/dev/outbox`, which is served only to a browser on the same computer. You can also try the core idea, sealing a card among trustees, on the [live page](https://chrisryanwill.github.io/project-ludlow/#try) without installing anything.
 
 **A five-minute walkthrough** (use a phone-sized window; open links in private windows to play different people):
 1. `Start a campaign`, pick the release number (try 3 people), and make your key. **You can invite people right away; nobody else has to join first.**
 2. On your dashboard: `Invite one person`, then `Create a group link`. Sign cards from those links in other windows.
 3. Confirm the group-link signers with their two-word codes. Watch the progress bar, the 30/50/70% markers and the gold lock marker. Try `Unlock and export` before the number is met: it is refused.
-4. In `Your committee`, get an invite link for each other trustee and let them join. Then `Lock the existing cards to the committee`. Now `Unlock and export` with two trustees' key files: the cards open **locally**; download the ZIP.
+4. In `Your committee`, get an invite link for each other trustee and let them join. Ask each one to read you their key words, tick the ones that match, then `Confirm the committee and lock the early cards`. Now `Unlock and export` with two trustees' key files: the cards open **locally**; download the ZIP.
 5. Tick "we have already gone public" to create the workspace. Claim accounts, hold a secret-ballot vote, recount it yourself, then open a case as a worker.
 
 ## What is built (all of it is tested)
 
 | Area | What you get |
 |---|---|
-| **Zero-knowledge cards** | Per-card keys split k-of-n (Shamir), sealed to each trustee; XChaCha20-Poly1305; Argon2id key files; challenge-response auth; no passwords, no cookies; everything secret lives in URL fragments; server stores only hashes and ciphertext. **One person can start alone**: the campaign is live as soon as the founder has a key, early cards are sealed to the founder, and when the committee has joined one button re-locks them k-of-n. |
+| **Zero-knowledge cards** | Per-card keys split k-of-n (Shamir), sealed to each trustee; XChaCha20-Poly1305; Argon2id key files; challenge-response auth; no passwords, no cookies; everything secret lives in URL fragments; server stores only hashes and ciphertext. **One person can start alone**: the campaign is live as soon as the founder has a key, early cards are sealed to the founder, and once the committee has joined and the founder has confirmed it, one button re-locks them k-of-n. |
 | **An enforced release lock** | Set when you create the campaign ("keep the cards sealed until at least N people have signed"). The server refuses to hand over the sealed cards until that many are signed *and* confirmed, so even all the trustees together have nothing to decrypt early. Raising it is free; lowering it takes k trustees. Signers and members can see the number. |
 | **Legal by design** | Cards carry every field NLRB GC 15-08 requires; a Confirmation Transmission is emailed (and then forgotten); disavow link; declaration, demand letter, petition worksheet generated from templates. The letter **refuses to claim a majority** the numbers do not show. |
 | **Any country** | *Jurisdiction packs* make the legal layer data: US (NLRA), UK (CAC), and a general pack where trustees enter their local threshold. Adding a country is content, not code. |
 | **Retaliation shield** | Each signer keeps a private, encrypted record of anything that looks like punishment for organizing (with a filing-deadline clock), and can share one entry with the committee, sealed to every trustee and unlinked from their card. |
-| **Verifiable democracy** | Secret ballots with no link between voter and ballot; the committee counts in a browser; **any member can recount** and check their receipt; concurrent double votes are impossible. |
+| **Verifiable democracy** | Secret ballots stored with no voter reference or timestamp (and re-shuffled on every cast, so the order is not left on disk); the committee counts in a browser; a decision that changes dues, rules or roles is always counted in the open and carries itself out; **any member can recount** the published ballots and check their receipt (that shows the numbers match the stored ballots, not that none were swapped); concurrent double votes are impossible. |
 | **Bylaws that execute themselves** | A vote that passes *changes reality*: dues, rule changes, removing an officer from a role. Members can force a vote or a recall by petition. Spending needs two officers; nobody approves their own request. |
-| **Every member is an auditor** | The ledger and audit log are hash chains. Each browser re-checks the chain and remembers the newest entry it saw, so rewritten history is caught. Ledger rows cannot be edited even by SQL (triggers). |
+| **Every member is an auditor** | The ledger and audit log are hash chains. Every member's browser re-checks the ledger, and officers' browsers the whole audit log from its first entry; each remembers the newest entry it saw, so rewritten history is caught. Database triggers stop the app itself from editing ledger or audit rows; someone with direct access to the database file could remove them, and the hash chains and device pins are what catch that. |
 | **Fair representation, enforced** | A case cannot close without a decision, a reason, and telling the worker. Grievance content is end-to-end encrypted. Deadlines (business days, holidays, time zones) are computed for you. Help is never gated by dues. |
-| **Safety** | Quick exit button and triple-Esc, neutral tab titles on private pages, QR-code invites (nothing sent, so no message trail), software fingerprint check, read-aloud, English and Spanish, works on cheap phones (no framework; strict CSP; nothing third-party, verified by a test that watches every network request). |
+| **Safety** | Quick exit button and triple-Esc, neutral tab titles on private pages, QR-code invites (nothing sent, so no message trail), software fingerprint check, read-aloud, the whole interface in Spanish (a first draft; the US card text is in Spanish too, the other legal pages are English only), works on cheap phones (no framework; strict CSP; nothing third-party, verified by a test that watches every network request). |
 | **The union owns its data** | One-click full export (officers, audit-logged), one SQLite file, a `Dockerfile` (built and run in production mode to verify it), no lock-in. |
-| **Verifiable software** | Builds are **reproducible**: a local build and the Docker build produce byte-identical `app.js`, so anyone can rebuild from source and compare the SHA-256 with what the site shows on `/verify`. |
+| **Verifiable software** | Builds are **reproducible**: CI checks on every change that a local build and the Docker build produce byte-identical `app.js`, so anyone can rebuild from source and compare the SHA-256 with what the site shows on `/verify`. |
 
 **Look and feel:** a union-hall masthead rather than a generic app: navy banner, rich ultramarine, gold highlights, serif headlines (system fonts only, nothing loaded from anywhere), a double-ruled authorization card, and a dark theme that follows the phone's setting. The whole palette is a handful of CSS variables at the top of `web/style.css`.
 
@@ -84,10 +84,12 @@ The original build specifications are in [`docs/spec/`](docs/spec/) and double a
 ## Before real-world use
 
 - **Host the server where no trustee controls it**, or the release lock binds nothing (it is enforced by the server; see the threat model).
+- **To run a server, follow [docs/DEPLOY.md](docs/DEPLOY.md)**: who should run it, the master key, HTTPS, checking the fingerprint, backups and updates.
+- **Read the [threat model](docs/THREAT_MODEL.md) first.** An [internal, AI-assisted security review](docs/reviews/2026-09-internal-review-1.md) found and fixed real problems and wrote down design-level limits (the biggest, a server that lies about which keys belong to whom, is now closed for cards and reports and still open for the workspace's grievance and vote keys). It is not an independent audit.
 - **Have a labor attorney review everything in `content/legal/`.** Every `TODO(lawyer)` / `TODO(accountant)` is a real open question.
 - Get an independent security review of `shared/crypto.js`, `server/`, and the deployment. Read the threat model first.
-- Set `WORKSPACE_MASTER_KEY` and back it up. Set `EMAIL_PROVIDER=postmark` (tracking is disabled in code) and a monitored `CONFIRMATION_REPLY_TO` inbox. Run behind HTTPS with `TRUST_PROXY=1`. Run **one** instance (challenges and rate limits are in memory).
-- The Spanish translation is a first draft and needs a native, legally aware review.
+- Set `WORKSPACE_MASTER_KEY` and back it up. Set `EMAIL_PROVIDER=postmark` (tracking is disabled in code) and a monitored `CONFIRMATION_REPLY_TO` inbox. Run behind HTTPS with `TRUST_PROXY=1` (the number of reverse proxies in front, 1 for Caddy or nginx), and set `NODE_ENV=production` (`npm start` does not; without it and without `WORKSPACE_MASTER_KEY`, a server listening only on this machine writes a development master key next to the database, and one listening on any other address refuses to start, with one line saying what to set). To move a database made in development to a server, start it with the key it was written with, `WORKSPACE_MASTER_KEY="$(cat data/dev-master.key)"`; otherwise its encrypted fields cannot be read. Run **one** instance (challenges and rate limits are in memory).
+- The Spanish translation is a first draft and needs a native, legally aware review (#10). It covers the whole interface and the US card text; the other legal pages (rights, safety tips, data protection, letters) are still English only.
 
 ## Not built yet
 
@@ -112,7 +114,7 @@ Project Ludlow is free software, licensed under the **GNU Affero General Public 
 | `PORT`, `HOST` | `8787`, `127.0.0.1` | Listen address (`HOST=0.0.0.0` in containers) |
 | `DATABASE_PATH` | `data/ludlow.db` | SQLite file |
 | `APP_BASE_URL` | `http://localhost:PORT` | Used in confirmation emails |
-| `WORKSPACE_MASTER_KEY` | dev key file | 32 bytes, base64. **Required in production.** |
+| `WORKSPACE_MASTER_KEY` | dev key file | 32 bytes, base64. **Required in production** and whenever `HOST` is not a loopback address (`localhost` in any case, `127.x.x.x`, `::1`). |
 | `EMAIL_PROVIDER` | `dev` | `dev` (in-memory outbox) or `postmark` |
 | `POSTMARK_SERVER_TOKEN`, `EMAIL_FROM`, `CONFIRMATION_REPLY_TO` | | Real email |
 | `CAMPAIGN_INACTIVITY_DAYS` | `180` | Idle campaigns are hard-deleted |
@@ -120,7 +122,9 @@ Project Ludlow is free software, licensed under the **GNU Affero General Public 
 | `ONLINE_OFFICER_ELECTIONS` | `false` | Needs attorney sign-off |
 | `SESSION_IDLE_HOURS`, `SESSION_MAX_DAYS` | `12`, `30` | Workspace sessions |
 | `RATE_STRICT_PER_MIN` | `90` | Sensitive-route limit per client per minute (a group signing on one Wi-Fi shares an IP) |
-| `TRUST_PROXY` | off | Read the client IP from proxy headers (rate limiting only) |
+| `TRUST_PROXY` | `0` | How many reverse proxies sit in front (1 for Caddy or nginx; a whole number, anything else stops the server). The client IP is then read from the end of `X-Forwarded-For` (rate limiting only); no other header is trusted |
+| `MIN_VOTE_HOURS` | `24` | The shortest a vote may stay open, so members have time to see it |
+| `CONFIRMATIONS_PER_CAMPAIGN_PER_DAY` | `2000` | Caps the confirmation emails one campaign can make this server send |
 
 ## Layout
 

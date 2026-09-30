@@ -4,11 +4,23 @@ import * as C from '../shared/crypto.js';
 import { WORDS } from '../shared/words.js';
 import * as D from '../shared/deadlines.js';
 import { can, PERMS, ROLES } from '../shared/permissions.js';
-import { evaluateVote, complianceTasks } from '../shared/constants.js';
+import { evaluateVote, complianceTasks, publishByDefault } from '../shared/constants.js';
 import { makeLimiter } from '../server/rate.js';
+import { clientIp, fromThisMachine } from '../server/http.js';
+import { loadMasterKey } from '../server/kms.js';
+import { mailboxKey } from '../server/campaign.js';
+import { organizeStep, workspaceStep } from '../shared/guide.js';
+import { loadConfig } from '../server/config.js';
+import { openDb } from '../server/db.js';
+import Database from 'better-sqlite3';
+import { mkdtempSync, existsSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { zip, crc32, csvCell, toCsv } from '../web/src/zip.js';
+import { verifyChain, auditFields, checkPinned, cardTextMatches, auditRows, compareKeyPins, checkCommitments } from '../shared/verify.js';
+import { authenticate, rosterToSign, checkMySeat, checkEnrollment, RosterError } from '../shared/roster.js';
 
 await C.ready;
 const flip = (s) => s.slice(0, -2) + (s.at(-2) === 'A' ? 'B' : 'A') + s.at(-1);
@@ -44,6 +56,16 @@ test('key file: round trip, wrong passphrase, and header tampering', () => {
   assert.throws(() => C.openKeyFile(file, 'wrong passphrase entirely'), /wrong_passphrase/);
   assert.throws(() => C.openKeyFile({ ...file, trusteeIndex: 1 }, 'correct horse battery staple'), /wrong_passphrase/); // cannot be moved to another trustee
   assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, memlimit: 2 ** 40 } }, 'x'), /bad_keyfile/); // refuses absurd KDF costs
+  const pass = 'correct horse battery staple';
+  assert.throws(() => C.openKeyFile({ ...file, format: 'member-keyfile-v1' }, pass), /wrong_passphrase/); // format is bound in
+  assert.throws(() => C.openKeyFile({ ...file, nonce: flip(file.nonce) }, pass), /wrong_passphrase/);
+  assert.throws(() => C.openKeyFile({ ...file, ciphertext: flip(file.ciphertext) }, pass), /wrong_passphrase/);
+  assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, salt: flip(file.kdf.salt) } }, pass), /wrong_passphrase/);
+  const cheap = C.makeKeyFile({ format: 'trustee-keyfile-v1', header: { campaignId: 'c1', trusteeIndex: 2 }, secrets, passphrase: pass, fast: true });
+  assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, opslimit: cheap.kdf.opslimit + 1 } }, pass), /wrong_passphrase/); // the cost is part of the key
+  assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, opslimit: 2 ** 40 } }, 'x'), /bad_keyfile/);
+  assert.throws(() => C.openKeyFile({ ...file, kdf: { ...file.kdf, alg: 'argon2i13' } }, pass), /bad_keyfile/);
+  for (const broken of [null, {}, { ...file, kdf: undefined }, { ...file, format: '' }]) assert.throws(() => C.openKeyFile(broken, pass), /bad_keyfile/);
   assert.ok(C.passphraseOk(C.generatePassphrase()));
   assert.ok(!C.passphraseOk('short'));
 });
@@ -71,6 +93,8 @@ test('reports shared with the committee: any one trustee can read, outsiders can
   for (const t of ts) assert.deepEqual(C.openReport(r, t.index, t.keys.boxPublicKey, t.keys.boxSecretKey), { what: 'boss asked who signed' });
   const outsider = C.newKeypairs();
   assert.throws(() => C.openReport(r, 1, outsider.boxPublicKey, outsider.boxSecretKey));
+  assert.throws(() => C.openReport({ ...r, id: 'r2' }, 1, ts[0].keys.boxPublicKey, ts[0].keys.boxSecretKey)); // bound to its id: cannot be replayed as another report
+  assert.throws(() => C.openReport(r, 4, ts[0].keys.boxPublicKey, ts[0].keys.boxSecretKey), /not_for_you/);
 });
 
 test('secret ballots: sealed to a key nobody holds whole; k committee members recount', async () => {
@@ -84,10 +108,24 @@ test('secret ballots: sealed to a key nobody holds whole; k committee members re
   assert.equal(C.publicFromSecret(sk), vk.votePublicKey);
   assert.deepEqual(C.countBallots(vk.votePublicKey, sk, cast.map((c) => c.ciphertext), 3), { counts: [3, 1, 1], invalid: 0 });
   await assert.rejects(C.reconstructVoteKey([mine(committee[0])])); // one member alone cannot
-  const wrong = await C.reconstructVoteKey([mine(committee[0]), mine(committee[1]), new Uint8Array(33).fill(7)]).catch(() => null);
-  if (wrong) assert.notEqual(C.publicFromSecret(wrong), vk.votePublicKey);
+  // A made-up share still combines (Shamir cannot tell), but into a key that does not match the vote's public key.
+  const [s0, s1] = [mine(committee[0]), mine(committee[1])];
+  const madeUp = new Uint8Array(33).fill(7); madeUp[32] = [7, 8, 9].find((x) => x !== s0[32] && x !== s1[32]); // an x the real shares do not use (theirs are random)
+  const wrong = await C.reconstructVoteKey([s0, s1, madeUp]);
+  assert.notEqual(C.publicFromSecret(wrong), vk.votePublicKey);
+  const bent = mine(committee[1]); bent[10] ^= 1; // one flipped bit in a real share (a middle byte: X25519 clamps bits in the first and last, which could hide the change)
+  assert.notEqual(C.publicFromSecret(await C.reconstructVoteKey([mine(committee[0]), bent])), vk.votePublicKey);
+  await assert.rejects(C.reconstructVoteKey([mine(committee[0]), mine(committee[0])]), /bad_shares/); // the same share twice is not two
   const junk = C.countBallots(vk.votePublicKey, sk, ['A'.repeat(107)], 3);
   assert.equal(junk.invalid, 1);
+  // Out-of-range choices (a tampered client) are counted as invalid, never folded into an option.
+  const odd = [3, 255, -1].map((o) => C.castBallot(vk.votePublicKey, o).ciphertext);
+  assert.deepEqual(C.countBallots(vk.votePublicKey, sk, odd, 3), { counts: [0, 0, 0], invalid: 3 });
+  // Sealed to another key: invalid, not counted.
+  const other = C.newKeypairs();
+  assert.deepEqual(C.countBallots(vk.votePublicKey, sk, [C.castBallot(other.boxPublicKey, 0).ciphertext], 3), { counts: [0, 0, 0], invalid: 1 });
+  // countBallots counts what it is given: de-duplication is the server's job (one ballot per receipt), so a copy counts twice here.
+  assert.deepEqual(C.countBallots(vk.votePublicKey, sk, [cast[3].ciphertext, cast[3].ciphertext], 3).counts, [0, 0, 2]);
   assert.equal(C.receiptHash(cast[0].receiptCode), cast[0].receiptHash);
   assert.equal(C.receiptHash(cast[0].receiptCode.toLowerCase()), cast[0].receiptHash);
 });
@@ -102,6 +140,11 @@ test('hash chain is deterministic and any edit changes every later hash', () => 
   assert.notEqual(t[1], a[1]);
   assert.notEqual(t[2], a[2]);
   assert.equal(C.canonicalJson({ b: 1, a: [2, { d: 1, c: 2 }] }), '{"a":[2,{"c":2,"d":1}],"b":1}');
+  assert.equal(C.canonicalJson({ a: undefined, b: null, c: [] , d: {} }), '{"b":null,"c":[],"d":{}}'); // undefined keys dropped, null kept
+  assert.equal(C.canonicalJson({ 'é': 1, z: 2, Z: 3, 10: 4, 9: 5 }), C.canonicalJson({ 9: 5, 10: 4, Z: 3, z: 2, 'é': 1 })); // insertion order never matters
+  assert.equal(C.canonicalJson('a"b\u2028'), JSON.stringify('a"b\u2028'));
+  assert.notEqual(C.canonicalJson({ a: '1' }), C.canonicalJson({ a: 1 })); // types are kept apart
+  assert.notEqual(C.canonicalJson(['a,b']), C.canonicalJson(['a', 'b']));
   assert.equal(C.vouchHash('id', ' maple  river '), C.vouchHash('id', 'MAPLE-RIVER'));
 });
 
@@ -234,4 +277,492 @@ test('frontend hygiene: every UI helper a page calls is imported or defined ther
     const missing = helpers.filter((h) => new RegExp(`(?<![\\w.$'"])${h}\\(`).test(body) && !imported.has(h) && !local.has(h));
     assert.deepEqual(missing, [], `${f} uses helpers it never imports`);
   }
+});
+
+test('key words: ten words that identify a public key, stable, distinct, and they refuse a missing key', () => {
+  const a = C.newKeypairs().boxPublicKey, b = C.newKeypairs().boxPublicKey;
+  const w = C.keyWords(a);
+  assert.equal(w, C.keyWords(a)); // stable: two people computing it independently see the same words
+  const parts = w.split('-');
+  assert.equal(parts.length, 10);
+  assert.ok(parts.every((p) => WORDS.includes(p)));
+  assert.notEqual(w, C.keyWords(b));
+  assert.notEqual(w, C.keyWords(flip(a))); // changing one character of the key changes the words
+  for (const bad of [null, undefined, '', 'short', 42]) assert.throws(() => C.keyWords(bad)); // two missing keys must never "match"
+  const seen = new Set();
+  for (let i = 0; i < 300; i++) seen.add(C.keyWords(C.newKeypairs().boxPublicKey));
+  assert.equal(seen.size, 300);
+});
+
+test('committee tally signatures: bound to the vote and the counts, and only the signer verifies', () => {
+  const a = C.newKeypairs(), b = C.newKeypairs();
+  const sig = C.signTally(a.signSecretKey, 'vote-1', [4, 1]);
+  assert.ok(C.verifyTally(a.signPublicKey, sig, 'vote-1', [4, 1]));
+  assert.ok(!C.verifyTally(a.signPublicKey, sig, 'vote-2', [4, 1])); // another vote
+  assert.ok(!C.verifyTally(a.signPublicKey, sig, 'vote-1', [5, 0])); // other counts
+  assert.ok(!C.verifyTally(a.signPublicKey, sig, 'vote-1', [4, 1, 0])); // a different number of options
+  assert.ok(!C.verifyTally(b.signPublicKey, sig, 'vote-1', [4, 1])); // someone else's key
+  assert.ok(!C.verifyTally(a.signPublicKey, flip(sig), 'vote-1', [4, 1])); // a tampered signature
+  assert.ok(!C.verifyTally(a.signPublicKey, 'not base64!', 'vote-1', [4, 1]));
+  assert.ok(!C.verifyTally('not a key', sig, 'vote-1', [4, 1]));
+  // a sign-in signature cannot be replayed as a tally signature: different message, different domain
+  const login = C.signAuth(a.signSecretKey, { nonce: 'n', route: 'r', scope: 's' });
+  assert.ok(!C.verifyTally(a.signPublicKey, login, 'r', []));
+});
+
+test('audit and ledger history: a chain check alone accepts a full rewrite, a pinned head catches it', () => {
+  const mk = (n, edit = {}) => { let prev = C.GENESIS; return Array.from({ length: n }, (_, i) => { const e = { seq: i + 1, actorId: 'a', action: edit[i + 1] || `act${i + 1}`, type: null, id: null, at: '2026-01-01T00:00:00Z' }; e.prevHash = prev; e.hash = C.chainHash(prev, auditFields(e)); prev = e.hash; return e; }); };
+  const real = mk(10);
+  const pin = verifyChain(real, auditFields).head;
+  assert.deepEqual(checkPinned(real, pin), { ok: true });
+  // an operator rewrites entry 3 and re-hashes everything after it: internally the chain is perfect...
+  const rewritten = mk(10, { 3: 'nothing to see here' });
+  assert.equal(verifyChain(rewritten, auditFields).ok, true);
+  // ...but it no longer matches the head this device saw before
+  assert.deepEqual(checkPinned(rewritten, pin), { ok: false, why: 'changed' });
+  // deleting entries and renumbering is caught too, and so is cutting the log back
+  assert.deepEqual(checkPinned(mk(9), pin), { ok: false, why: 'missing' });
+  // a device that has never looked can only check consistency
+  assert.deepEqual(checkPinned(rewritten, null), { ok: true, first: true });
+  // a long log is shown as its newest window: a pin older than the window cannot be compared, one inside it must match
+  const window = real.slice(5);
+  assert.deepEqual(checkPinned(window, { seq: 2, hash: real[1].hash }), { ok: true, unchecked: true });
+  assert.deepEqual(checkPinned(window, { seq: 7, hash: real[6].hash }), { ok: true });
+  assert.deepEqual(checkPinned(window, { seq: 7, hash: 'AAAA' }), { ok: false, why: 'changed' });
+});
+
+test('fingerprints are 80 bits, so a forged history cannot be ground into showing the same one', () => {
+  const h = C.chainHash(C.GENESIS, { a: 1 });
+  const f = C.fingerprint(h);
+  assert.match(f, /^[0-9A-F]{4}(-[0-9A-F]{4}){4}$/);
+  assert.equal(f, C.fingerprint(h));
+  assert.notEqual(f, C.fingerprint(C.chainHash(C.GENESIS, { a: 2 })));
+  assert.equal(C.fingerprint('not a hash!'), '');
+  assert.equal(C.fingerprint(undefined), '');
+});
+
+test('shamir shares are checked before they are combined: x = 0, wrong lengths and repeats are refused', async () => {
+  const ts = trustees(3);
+  const enc = await C.encryptCard({ campaignId: 'c1', templateVersion: 'card-v1', payload: { n: 1 }, trustees: pubs(ts), k: 2 });
+  const shares = ts.map((t) => C.openShare(enc.sealedShares.find((s) => s.trusteeIndex === t.index).sealed, t.keys.boxPublicKey, t.keys.boxSecretKey));
+  const ctx = { campaignId: 'c1', templateVersion: 'card-v1', ciphertext: enc.ciphertext, nonce: enc.nonce };
+  assert.deepEqual(await C.decryptCard(ctx, [shares[0], shares[1]]), { n: 1 });
+  const zero = new Uint8Array(33).fill(7); zero[32] = 0; // an "x = 0" share: combine() would hand back whatever bytes the sender chose
+  await assert.rejects(C.decryptCard(ctx, [shares[0], zero]), /unlock_failed/);
+  await assert.rejects(C.reconstructVoteKey([shares[0], zero]), /bad_shares/);
+  await assert.rejects(C.reconstructVoteKey([shares[0], shares[0]]), /bad_shares/); // the same share twice
+  await assert.rejects(C.reconstructVoteKey([shares[0], shares[1].slice(0, 32)]), /bad_shares/); // wrong length
+  await assert.rejects(C.reconstructVoteKey([shares[0]]), /bad_shares/); // too few
+  await assert.rejects(C.reconstructVoteKey([shares[0], 'not a share']), /bad_shares/);
+});
+
+test('the client address comes from the proxy that is trusted, not from whatever the client wrote in X-Forwarded-For', () => {
+  const req = (xff, remote = '10.0.0.1') => ({ headers: xff ? { 'x-forwarded-for': xff } : {}, socket: { remoteAddress: remote } });
+  assert.equal(clientIp(req('6.6.6.6, 203.0.113.9'), { trustProxy: 1 }), '203.0.113.9'); // the client's own claim is at the front; the proxy appended the truth
+  assert.equal(clientIp(req('203.0.113.9'), { trustProxy: 1 }), '203.0.113.9');
+  assert.equal(clientIp(req('6.6.6.6, 203.0.113.9, 10.1.1.1'), { trustProxy: 2 }), '203.0.113.9'); // two proxies
+  assert.equal(clientIp(req('6.6.6.6'), { trustProxy: 0 }), '10.0.0.1'); // no proxy: the header means nothing
+  // A header only one hosting company's proxy sets is just client input behind any other proxy: it must never pick the address.
+  const flyReq = { headers: { 'fly-client-ip': '6.6.6.6', 'x-forwarded-for': '203.0.113.9' }, socket: { remoteAddress: '10.0.0.1' } };
+  assert.equal(clientIp(flyReq, { trustProxy: 1 }), '203.0.113.9');
+  assert.equal(clientIp(flyReq, { trustProxy: 0 }), '10.0.0.1');
+  assert.equal(loadConfig({}).trustProxy, 0);
+  assert.equal(loadConfig({ TRUST_PROXY: '1' }).trustProxy, 1);
+  for (const bad of ['true', 'yes', '-1', '1.5', 'x']) assert.throws(() => loadConfig({ TRUST_PROXY: bad }), /TRUST_PROXY/, bad);
+  assert.equal(clientIp(req(null), { trustProxy: 1 }), '10.0.0.1');
+  assert.equal(clientIp(req('1.1.1.1'), { trustProxy: 3 }), '10.0.0.1'); // fewer entries than proxies: the header was not set by them
+  assert.equal(clientIp(req('6.6.6.6, 203.0.113.9'), { trustProxy: true }), '203.0.113.9'); // the old boolean setting still means one proxy
+});
+
+test('names that go into Markdown cannot turn into links, emphasis or code', async () => {
+  const { plainMd } = await import('../web/src/format.js');
+  for (const evil of ['[click here](https://phish.example)', '**Free** dues `now`', 'A *B* C', 'TODO(lawyer): x']) {
+    const out = plainMd(evil);
+    assert.ok(!/[\[\]()*`]/.test(out), out);
+  }
+  assert.equal(plainMd('Riverside Workers United'), 'Riverside Workers United'); // ordinary names are untouched
+  assert.equal(plainMd('Local  42\n  (Cooks)'), 'Local 42 Cooks');
+  assert.equal(plainMd(null), '');
+});
+
+// ---- the founder's key check and the signed roster: a lying server must not make a genuine browser seal to a key of its own ----
+const rosterWorld = (n = 3, k = 2) => {
+  const ts = trustees(n);
+  const commit = C.founderCommit(ts[0].keys.boxPublicKey, ts[0].keys.signPublicKey);
+  const listed = (enrolled = n) => ts.map((t, i) => ({ index: t.index, enrolled: i < enrolled, boxPublicKey: i < enrolled ? t.keys.boxPublicKey : null, signPublicKey: i < enrolled ? t.keys.signPublicKey : null }));
+  const roster = { campaignId: 'camp-1', k, n, seats: ts.map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey })) };
+  const signed = { roster, signature: C.signRoster(ts[0].keys.signSecretKey, roster) };
+  const raw = (over = {}) => ({ n, k, trustees: listed(), roster: signed, ...over });
+  return { ts, commit, listed, roster, signed, raw };
+};
+const refuses = (fn, code) => assert.throws(fn, (e) => e instanceof RosterError && e.code === code, `expected ${code}`);
+
+test('founder key check: 128 bits over both public keys, so neither can be swapped', () => {
+  const a = C.newKeypairs(), b = C.newKeypairs();
+  const c = C.founderCommit(a.boxPublicKey, a.signPublicKey);
+  assert.match(c, /^[A-Za-z0-9_-]{22}$/);
+  assert.equal(c, C.founderCommit(a.boxPublicKey, a.signPublicKey));
+  assert.notEqual(c, C.founderCommit(b.boxPublicKey, a.signPublicKey)); // a different box key
+  assert.notEqual(c, C.founderCommit(a.boxPublicKey, b.signPublicKey)); // a different signing key
+  assert.notEqual(c, C.founderCommit(a.signPublicKey, a.boxPublicKey)); // order matters
+});
+
+test('roster signatures: bound to the exact committee, the campaign and the threshold; nothing else the founder signs can be a roster', () => {
+  const w = rosterWorld(), F = w.ts[0].keys;
+  assert.ok(C.verifyRoster(F.signPublicKey, w.signed.signature, w.roster));
+  const forge = (edit) => C.verifyRoster(F.signPublicKey, w.signed.signature, edit(structuredClone(w.roster)));
+  assert.ok(!forge((r) => { r.seats[1].boxPublicKey = C.newKeypairs().boxPublicKey; return r; })); // a swapped trustee key
+  assert.ok(!forge((r) => { r.k = 3; return r; })); // a changed threshold
+  assert.ok(!forge((r) => { r.campaignId = 'camp-2'; return r; })); // another campaign
+  assert.ok(!forge((r) => { r.seats.reverse(); return r; })); // reordered
+  assert.ok(!forge((r) => { r.seats.pop(); r.n = 2; return r; })); // a smaller committee
+  assert.ok(!C.verifyRoster(w.ts[1].keys.signPublicKey, w.signed.signature, w.roster)); // signed by someone else
+  assert.ok(C.verifyRoster(F.signPublicKey, w.signed.signature, { ...w.roster, extra: 'ignored' })); // unknown fields are not signed and change nothing
+  // the same key signs sign-in challenges and tallies: neither can be replayed as a roster
+  assert.ok(!C.verifyRoster(F.signPublicKey, C.signAuth(F.signSecretKey, { nonce: 'n', route: 'POST /api/campaigns/:id/roster', scope: 'camp-1' }), w.roster));
+  assert.ok(!C.verifyRoster(F.signPublicKey, C.signTally(F.signSecretKey, 'camp-1', [2, 1]), w.roster));
+  // malformed rosters are refused whatever the signature says
+  const bad = [{ ...w.roster, k: 1 }, { ...w.roster, k: 4 }, { ...w.roster, n: 4 }, { ...w.roster, seats: [w.roster.seats[0], w.roster.seats[0], w.roster.seats[2]] },
+    { ...w.roster, seats: w.roster.seats.map((s) => ({ ...s, index: s.index + 1 })) }, { ...w.roster, campaignId: 7 }, null, 'x'];
+  for (const r of bad) assert.ok(!C.verifyRoster(F.signPublicKey, C.signRoster(F.signSecretKey, w.roster), r));
+});
+
+test('a signer before the committee is confirmed seals to the founder alone, and only if the founder\'s keys match the link', () => {
+  const w = rosterWorld();
+  const a = authenticate(w.raw({ roster: null, trustees: w.listed(1) }), w.commit, 'camp-1');
+  assert.deepEqual([a.mode, a.seats.length, a.seats[0].boxPublicKey, a.k], ['solo', 1, w.ts[0].keys.boxPublicKey, null]);
+  // the server swaps the founder's keys, one at a time and both: the link's check no longer matches
+  const evil = C.newKeypairs();
+  for (const swap of [{ boxPublicKey: evil.boxPublicKey }, { signPublicKey: evil.signPublicKey }, { boxPublicKey: evil.boxPublicKey, signPublicKey: evil.signPublicKey }]) {
+    refuses(() => authenticate(w.raw({ roster: null, trustees: w.listed(1).map((x, i) => (i === 0 ? { ...x, ...swap } : x)) }), w.commit, 'camp-1'), 'founder_mismatch');
+  }
+  refuses(() => authenticate(w.raw({ roster: null, trustees: w.listed(1) }), undefined, 'camp-1'), 'no_commit'); // a link without a key check cannot be verified
+  refuses(() => authenticate(w.raw({ roster: null, trustees: w.listed(1) }), 'short', 'camp-1'), 'no_commit');
+  refuses(() => authenticate(w.raw({ roster: null, trustees: w.listed(0) }), w.commit, 'camp-1'), 'no_founder');
+  refuses(() => authenticate(w.raw({ roster: null, trustees: [] }), w.commit, 'camp-1'), 'no_founder');
+  // enrolled trustees the founder has not signed for yet are NOT sealed to, even if everyone has joined
+  const unconfirmed = authenticate(w.raw({ roster: null }), w.commit, 'camp-1');
+  assert.deepEqual([unconfirmed.mode, unconfirmed.seats.length], ['solo', 1]);
+});
+
+test('once the founder has signed the roster, a signer seals to that committee and to nothing the server adds or swaps', () => {
+  const w = rosterWorld(3, 2);
+  const a = authenticate(w.raw(), w.commit, 'camp-1');
+  assert.deepEqual([a.mode, a.k, a.seats.map((s) => s.index)], ['shamir', 2, [1, 2, 3]]);
+  assert.deepEqual(a.seats.map((s) => s.boxPublicKey), w.ts.map((t) => t.keys.boxPublicKey));
+  const evil = C.newKeypairs();
+  // the server swaps a trustee's key in its list only: what was signed still wins, and the difference is reported
+  refuses(() => authenticate(w.raw({ trustees: w.listed().map((x) => (x.index === 2 ? { ...x, boxPublicKey: evil.boxPublicKey } : x)) }), w.commit, 'camp-1'), 'roster_mismatch');
+  // ...or in the roster it serves, which it cannot re-sign
+  const forged = structuredClone(w.signed); forged.roster.seats[1].boxPublicKey = evil.boxPublicKey;
+  refuses(() => authenticate(w.raw({ roster: forged, trustees: w.listed().map((x) => (x.index === 2 ? { ...x, boxPublicKey: evil.boxPublicKey } : x)) }), w.commit, 'camp-1'), 'roster_invalid');
+  // a roster signed by the server's own key, or by a trustee who is not the founder
+  for (const impostor of [evil, w.ts[1].keys]) {
+    const r = structuredClone(w.roster); r.seats[1].boxPublicKey = evil.boxPublicKey;
+    refuses(() => authenticate(w.raw({ roster: { roster: r, signature: C.signRoster(impostor.signSecretKey, r) } }), w.commit, 'camp-1'), 'roster_invalid');
+  }
+  // a genuine roster for a different campaign, replayed
+  refuses(() => authenticate(w.raw(), w.commit, 'camp-2'), 'roster_invalid');
+  // a lower threshold, or a different size, than the founder signed
+  refuses(() => authenticate(w.raw({ k: 2, roster: { roster: { ...w.roster, k: 3 }, signature: w.signed.signature } }), w.commit, 'camp-1'), 'roster_invalid');
+  refuses(() => authenticate(w.raw({ n: 4 }), w.commit, 'camp-1'), 'roster_mismatch');
+  refuses(() => authenticate(w.raw({ k: 3 }), w.commit, 'camp-1'), 'roster_mismatch');
+  // the founder's key check still has to match, so a whole invented committee signed by an invented founder fails too
+  const fake = rosterWorld(3, 2);
+  refuses(() => authenticate({ ...fake.raw(), campaignId: 'camp-1' }, w.commit, 'camp-1'), 'founder_mismatch');
+  // a validly signed roster whose seat 1 is not the founder's key is refused
+  const odd = structuredClone(w.roster); odd.seats[0].boxPublicKey = evil.boxPublicKey;
+  refuses(() => authenticate(w.raw({ roster: { roster: odd, signature: C.signRoster(w.ts[0].keys.signSecretKey, odd) } }), w.commit, 'camp-1'), 'roster_invalid');
+  // withholding the roster cannot make a browser use the server's list: it falls back to the founder alone
+  const withheld = authenticate(w.raw({ roster: null }), w.commit, 'camp-1');
+  assert.deepEqual([withheld.mode, withheld.seats.length], ['solo', 1]);
+});
+
+test('the founder signs only a roster built from their own key and the committee they checked', () => {
+  const w = rosterWorld(), F = w.ts[0].keys, evil = C.newKeypairs();
+  const P = { k: w.raw().k, n: w.raw().n };
+  const built = rosterToSign(w.raw({ roster: null }), 'camp-1', F, P);
+  assert.ok(C.verifyRoster(F.signPublicKey, C.signRoster(F.signSecretKey, built), built));
+  assert.deepEqual(built.seats.map((s) => s.boxPublicKey), w.ts.map((t) => t.keys.boxPublicKey));
+  refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed(2) }), 'camp-1', F, P), 'committee_incomplete'); // someone has not joined
+  // the server puts a different key in the founder's own seat (which the founder did not check against anyone)
+  for (const swap of [{ boxPublicKey: evil.boxPublicKey }, { signPublicKey: evil.signPublicKey }]) {
+    refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x, i) => (i === 0 ? { ...x, ...swap } : x)) }), 'camp-1', F, P), 'own_seat_mismatch');
+  }
+  refuses(() => rosterToSign(w.raw({ roster: null, trustees: w.listed().map((x) => (x.index === 3 ? { ...x, boxPublicKey: 'short' } : x)) }), 'camp-1', F, P), 'committee_incomplete');
+});
+
+test('the founder signs the threshold they chose, not one the server reports', () => {
+  const w = rosterWorld(5, 4), F = w.ts[0].keys;
+  assert.equal(rosterToSign(w.raw({ roster: null }), 'camp-1', F, { k: 4, n: 5 }).k, 4);
+  refuses(() => rosterToSign(w.raw({ roster: null, k: 2 }), 'camp-1', F, { k: 4, n: 5 }), 'plan_mismatch'); // the server lowered it
+  refuses(() => rosterToSign(w.raw({ roster: null }), 'camp-1', F, { k: 3, n: 5 }), 'plan_mismatch');
+  // no plan at all: the page never fills one in from the website's numbers; the founder types what they chose, from memory
+  for (const none of [undefined, null, {}, { k: 4 }, { k: '4', n: '5' }]) refuses(() => rosterToSign(w.raw({ roster: null }), 'camp-1', F, none), none === undefined || none === null ? 'plan_required' : 'plan_mismatch');
+});
+
+test('a trustee invitation cannot be turned into the founder\'s seat, or point at a different founder', () => {
+  const w = rosterWorld(3, 2);
+  assert.equal(checkEnrollment(w.raw({ roster: null, trustees: w.listed(0) }), 1, undefined), 'founder'); // the founder's own link has no check: there is nothing to check yet
+  assert.equal(checkEnrollment(w.raw({ roster: null, trustees: w.listed(1) }), 2, w.commit), 'ok');
+  refuses(() => checkEnrollment(w.raw({ roster: null, trustees: w.listed(1) }), 1, w.commit), 'not_founder'); // a link with a founder check is never the founder's
+  refuses(() => checkEnrollment(w.raw({ roster: null, trustees: w.listed(1) }), 2, rosterWorld().commit), 'founder_mismatch'); // seat 1 is not who the link says
+  refuses(() => checkEnrollment(w.raw({ roster: null, trustees: w.listed(0) }), 2, w.commit), 'no_founder'); // seat 1 has not joined, so the check cannot be made
+  assert.equal(checkEnrollment(w.raw({ roster: null, trustees: w.listed(1) }), 2, undefined), 'unchecked'); // an older link: allowed, with the existing warning
+});
+
+test('a trustee can check that the roster the founder signed contains their own key', () => {
+  const w = rosterWorld();
+  assert.equal(checkMySeat(w.raw({ roster: null }), w.commit, 'camp-1', 2, w.ts[1].keys.boxPublicKey), 'unsigned');
+  assert.equal(checkMySeat(w.raw(), undefined, 'camp-1', 2, w.ts[1].keys.boxPublicKey), 'unknown'); // an older key file with no key check to verify against
+  assert.equal(checkMySeat(w.raw(), w.commit, 'camp-1', 2, w.ts[1].keys.boxPublicKey), 'ok');
+  refuses(() => checkMySeat(w.raw(), w.commit, 'camp-1', 2, C.newKeypairs().boxPublicKey), 'my_key_missing'); // the roster names a key that is not mine
+  // a founder who signed a different key for seat 2 is caught by trustee 2
+  const swapped = structuredClone(w.roster); swapped.seats[1].boxPublicKey = C.newKeypairs().boxPublicKey;
+  const raw = w.raw({ roster: { roster: swapped, signature: C.signRoster(w.ts[0].keys.signSecretKey, swapped) }, trustees: w.listed().map((x) => (x.index === 2 ? { ...x, boxPublicKey: swapped.seats[1].boxPublicKey } : x)) });
+  refuses(() => checkMySeat(raw, w.commit, 'camp-1', 2, w.ts[1].keys.boxPublicKey), 'my_key_missing');
+  refuses(() => checkMySeat(w.raw(), w.commit, 'camp-2', 2, w.ts[1].keys.boxPublicKey), 'roster_invalid');
+});
+
+// The browser code may seal for the trustees only to keys shared/roster.js has authenticated, and every invitation link carries the founder's key
+// check. This reads web/src and returns what breaks those rules. It is deliberately strict about shape: each sealing call must name an authenticated
+// source directly, so routing the server's list through a variable, an alias or a helper is caught too.
+function trustViolations(files) {
+  const out = [];
+  const SEALS = ['encryptCard', 'encryptCardSolo', 'sealForTrustees', 'reshareCard'];
+  const args = (src, at) => { // the text between the parentheses that open at `at`
+    let depth = 0;
+    for (let i = at; i < src.length; i++) { if (src[i] === '(') depth++; else if (src[i] === ')' && --depth === 0) return src.slice(at + 1, i); }
+    return '';
+  };
+  for (const [f, src] of Object.entries(files)) {
+    for (const name of SEALS) {
+      for (const m of src.matchAll(new RegExp(`\\b${name}\\b`, 'g'))) {
+        if (src[m.index + name.length] !== '(') { out.push(`${f}: ${name} used other than by calling it (an alias?)`); continue; }
+        const a = args(src, m.index + name.length).replace(/\s+/g, ' ');
+        const ok = name === 'encryptCard' ? /\btrustees: sealTo\.seats\b/.test(a) && /\bk: sealTo\.k\b/.test(a)
+          : name === 'encryptCardSolo' ? /\bfounder: sealTo\.seats\[0\]/.test(a)
+            : name === 'sealForTrustees' ? /, sealTo\.seats, /.test(a)
+              : /, seats, k$/.test(a.trim()); // reshareCard only inside relock(seats, k)
+        if (!ok) out.push(`${f}: ${name}(${a.slice(0, 70)}) does not seal to authenticated keys`);
+      }
+    }
+    // where those authenticated keys come from
+    for (const m of src.matchAll(/\bsealTo\s*=\s*([A-Za-z_.]+)\(/g)) if (m[1] !== 'authenticate') out.push(`${f}: sealTo assigned from ${m[1]}()`);
+    for (const m of src.matchAll(/\bsealTo\s*=(?!=)\s*(?=\S)(?![A-Za-z_.]+\()/g)) out.push(`${f}: sealTo assigned from something other than a call: ${src.slice(m.index, m.index + 50)}`);
+    for (const m of src.matchAll(/\brelock\(([^)]*)\)/g)) {
+      const a = m[1].replace(/\s+/g, ' ').trim();
+      if (a === 'seats, k') continue; // its own definition
+      if (!['roster.seats, roster.k', 'a.seats, a.k'].includes(a)) out.push(`${f}: relock(${a}) with keys that were not signed`);
+    }
+    if (/\brelock\(/.test(src)) {
+      if (!/\bconst roster = rosterToSign\(/.test(src) || /\broster = (?!rosterToSign\()/.test(src)) out.push(`${f}: roster does not come from rosterToSign()`);
+      if (!/\bconst a = authenticate\(/.test(src) || /\ba = (?!authenticate\()/.test(src.replace(/\bconst a = authenticate\(/g, ''))) out.push(`${f}: a does not come from authenticate()`);
+    }
+    // invitation and member links: an object literal carrying f (the founder's own first link cannot: their keys do not exist yet)
+    for (const m of src.matchAll(/linkTo\('\/(j|t|m)',\s*/g)) {
+      const rest = src.slice(m.index + m[0].length);
+      if (rest[0] !== '{') { out.push(`${f}: a /${m[1]} link is built from something other than an object literal`); continue; }
+      let depth = 0, end = 0;
+      for (let i = 0; i < rest.length; i++) { if (rest[i] === '{') depth++; else if (rest[i] === '}' && --depth === 0) { end = i; break; } }
+      const obj = rest.slice(0, end + 1);
+      const firstFounderLink = m[1] === 't' && /\be: tok\b/.test(obj);
+      if (!firstFounderLink && !/\bf: (?!undefined\b|null\b|''|"")[A-Za-z_]/.test(obj)) out.push(`${f}: a /${m[1]} link is built without the founder's key check: ${obj.slice(0, 80)}`);
+    }
+  }
+  return out;
+}
+
+test('frontend trust: everything sealed for the trustees goes through the roster check, and invitation links carry the founder\'s key check', () => {
+  const dir = path.resolve(import.meta.dirname, '../web/src');
+  const files = Object.fromEntries(readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => [f, readFileSync(path.join(dir, f), 'utf8')]));
+  assert.deepEqual(trustViolations(files), []);
+  // The check itself must catch the ways this has gone wrong or nearly did (the first is the code before the roster existed).
+  const mutate = (f, from, to) => { assert.ok(files[f].includes(from), `mutation no longer applies: ${from}`); return { ...files, [f]: files[f].replace(from, to) }; };
+  const mutants = {
+    'relock to the server\'s list': mutate('trustee.js', 'await relock(roster.seats, roster.k);', '{ const trustees = raw.trustees.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey })); await relock(trustees, raw.k); }'),
+    'report to the server\'s list via a variable': mutate('organize.js', 'sealTo.seats, rid)', 'fromServer, rid)'),
+    'card to the server\'s list via a variable': mutate('organize.js', 'trustees: sealTo.seats, k: sealTo.k', 'trustees: all, k: raw.k'),
+    'sealTo from the server': mutate('organize.js', 'sealTo = authenticate(raw, fc, c);', 'sealTo = { mode: raw.roster ? "shamir" : "solo", seats: raw.trustees, k: raw.k };'),
+    'aliased seal function': mutate('organize.js', 'C.encryptCard({', '(0, C.encryptCard)({'),
+    'invitation with f: undefined': mutate('organize.js', "linkTo('/j', { i: token, k, c, f: saved.founder })", "linkTo('/j', { i: token, k, c, f: undefined })"),
+    'invitation built from a variable': mutate('organize.js', "linkTo('/j', { i: token, k, c, f: saved.founder })", 'linkTo(\'/j\', P)'),
+    'member link without f': mutate('organize.js', "linkTo('/m', { s: R.secret, k, c, f: fc })", "linkTo('/m', { s: R.secret, k, c })"),
+    'trustee seat link without f': mutate('trustee.js', 'c: T.campaignId, f: T.founder }); // the link carries', 'c: T.campaignId }); // the link carries'),
+  };
+  for (const [name, m] of Object.entries(mutants)) assert.ok(trustViolations(m).length > 0, `the tripwire misses: ${name}`);
+});
+
+test('master key: the development key file is never made for a server reachable from other machines', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'ludlow-kms-'));
+  const cfg = (host, extra = {}) => ({ host, production: false, masterKey: '', dbPath: path.join(dir, host.replace(/[^a-z0-9]/gi, '_'), 'x.db'), ...extra });
+  for (const host of ['0.0.0.0', '::', '192.168.1.20', 'example.org']) {
+    assert.throws(() => loadMasterKey(cfg(host)), /WORKSPACE_MASTER_KEY/, host);
+    assert.equal(existsSync(path.join(path.dirname(cfg(host).dbPath), 'dev-master.key')), false, host);
+  }
+  for (const host of ['127.0.0.1', '127.0.0.2', '::1', 'localhost', 'LOCALHOST', 'LocalHost']) assert.equal(loadMasterKey(cfg(host)).length, 32, host);
+  const key = C.b64(C.randomBytes(32));
+  assert.equal(loadMasterKey(cfg('0.0.0.0', { masterKey: key })).length, 32); // a real key is fine anywhere
+  assert.throws(() => loadMasterKey(cfg('127.0.0.1', { production: true })), /required in production/);
+});
+
+test('start-up without a master key on a reachable address: one clean line naming both ways out, not a stack trace', () => {
+  const run = (dir) => spawnSync(process.execPath, ['server/index.js'], { encoding: 'utf8', timeout: 20000,
+    env: { PATH: process.env.PATH, HOST: '0.0.0.0', PORT: '0', DATABASE_PATH: path.join(dir, 'ludlow.db'), NODE_ENV: 'development' } });
+  const fresh = mkdtempSync(path.join(tmpdir(), 'ludlow-start-'));
+  const r = run(fresh);
+  assert.equal(r.status, 1);
+  const lines = r.stderr.trim().split('\n');
+  assert.equal(lines.length, 1, r.stderr);
+  assert.doesNotMatch(r.stderr, /\n\s+at |Error:/);
+  assert.match(lines[0], /WORKSPACE_MASTER_KEY/); assert.match(lines[0], /openssl rand -base64 32/);
+  assert.match(lines[0], /WORKSPACE_MASTER_KEY="\$\(cat .*dev-master\.key\)"/); // the other case: keep the key the development data was written with
+  assert.equal(existsSync(path.join(fresh, 'dev-master.key')), false);
+  const dev = mkdtempSync(path.join(tmpdir(), 'ludlow-start-'));
+  writeFileSync(path.join(dev, 'dev-master.key'), C.b64(C.randomBytes(32)));
+  const r2 = run(dev);
+  assert.equal(r2.status, 1); assert.equal(r2.stderr.trim().split('\n').length, 1);
+  assert.match(r2.stderr, new RegExp('cat ' + path.join(dev, 'dev-master.key').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))); // names this server's own key file
+});
+
+test('the development outbox is served only to a browser on this machine, never through a proxy', () => {
+  const req = (remoteAddress, headers = {}) => ({ socket: { remoteAddress }, headers });
+  for (const a of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) assert.equal(fromThisMachine(req(a)), true, a);
+  for (const a of ['10.0.0.5', '192.168.1.2', '::ffff:10.0.0.5', undefined]) assert.equal(fromThisMachine(req(a)), false, String(a));
+  assert.equal(fromThisMachine(req('127.0.0.1', { 'x-forwarded-for': '203.0.113.9' })), false); // a proxy on this machine passing on someone else
+  assert.equal(fromThisMachine(req('127.0.0.1', { forwarded: 'for=203.0.113.9' })), false);
+  assert.equal(fromThisMachine(req('127.0.0.1', { 'x-real-ip': '203.0.113.9' })), false);
+});
+
+test('the counting page does not suggest publishing the ballot key for votes where members could be pressured to prove their vote', () => {
+  for (const type of ['strike_authorization', 'ratification']) assert.equal(publishByDefault({ type, hasEffect: false }), false, type);
+  for (const type of ['general', 'officer_election']) assert.equal(publishByDefault({ type, hasEffect: false }), true, type);
+  for (const type of ['dues_change', 'bylaws_amendment', 'recall']) assert.equal(publishByDefault({ type, hasEffect: true }), true, type); // a decision with an effect is always recounted
+  const votes = readFileSync(new URL('../web/src/ws-votes.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(votes, /afterward any member can recount/); // not true when the committee keeps the key back
+});
+
+test('Spanish: the terms the review flagged stay fixed (one word for key, no password-like "palabras clave", no "unknown" for disavowed)', () => {
+  const es = readFileSync(new URL('../web/src/es.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(es, /\bclaves?\b/); // "llave" throughout, so a key is never confused with a password
+  assert.doesNotMatch(es, /palabras clave/);
+  assert.doesNotMatch(es, /desconocid/); // a disavowed card is not an unknown one
+  assert.doesNotMatch(es, /cerrad[ao]s? para|cerrará para/); // "locked to the committee", not "locked out"
+  assert.doesNotMatch(es, /calendar \(naturales\)/); // it invited typing "naturales" in the step format
+  const help = readFileSync(new URL('../web/src/ws-help.js', import.meta.url), 'utf8');
+  assert.match(help, /naturales/); // and the step format accepts it anyway
+});
+
+test('the database never runs in WAL mode, where one commit would put a voter\'s "has voted" next to their ballot', () => {
+  const file = path.join(mkdtempSync(path.join(tmpdir(), 'ludlow-db-')), 'x.db');
+  const pre = new Database(file); pre.pragma('journal_mode = WAL'); pre.close(); // a file someone switched to WAL, say with the sqlite3 shell
+  const db = openDb(file);
+  try { assert.equal(db.pragma('journal_mode', { simple: true }), 'delete'); } finally { db.close(); }
+});
+
+test('an opened card whose text does not match its own fingerprint is flagged, not trusted', () => {
+  const cardText = 'I authorize the union to represent me.';
+  assert.equal(cardTextMatches({ cardText, cardTextSha256: C.sha256Hex(cardText) }), true);
+  assert.equal(cardTextMatches({ cardText: cardText + ' Only for an election.', cardTextSha256: C.sha256Hex(cardText) }), false); // text changed after hashing
+  assert.equal(cardTextMatches({ cardText, cardTextSha256: C.sha256Hex(cardText).toUpperCase() }), true); // hex case is not a difference
+  for (const bad of [{ cardText }, { cardTextSha256: C.sha256Hex(cardText) }, {}, null]) assert.equal(cardTextMatches(bad), false);
+});
+
+test('a trustee\'s signature covers the request body: the same signature does not carry a different body', () => {
+  const k = C.newKeypairs();
+  const parts = { nonce: 'n1', route: 'POST /api/campaigns/:id/release-min', scope: 'c1' };
+  const sig = C.signAuth(k.signSecretKey, { ...parts, bodyHash: C.bodyHash('{"value":50}') });
+  assert.equal(C.verifyAuth(k.signPublicKey, sig, { ...parts, bodyHash: C.bodyHash('{"value":50}') }), true);
+  assert.equal(C.verifyAuth(k.signPublicKey, sig, { ...parts, bodyHash: C.bodyHash('{"value":5}') }), false); // the body was changed on the way
+  assert.equal(C.verifyAuth(k.signPublicKey, sig, parts), false); // and it is not a body-less signature either
+  assert.equal(C.verifyAuth(k.signPublicKey, C.signAuth(k.signSecretKey, parts), { ...parts, bodyHash: C.bodyHash('') }), false);
+  assert.equal(C.bodyHash(undefined), C.bodyHash(''));
+});
+
+test('a passphrase must be long and not a pattern', () => {
+  for (let i = 0; i < 20; i++) assert.ok(C.passphraseOk(C.generatePassphrase()));
+  for (const good of ['correct horse battery staple', 'Tr0ub4dor&3-plus-more', 'my dog ate 7 green socks']) assert.ok(C.passphraseOk(good), good);
+  for (const bad of ['short', 'aaaaaaaaaaaaaaaa', 'abababababababab', 'passwordpassword', '12345678901234567', 'abcdefghijklmnop', 'zyxwvutsrqponmlk', 'test test test test', 'union-union-union-union', 12345678901234, null]) {
+    assert.equal(C.passphraseOk(bad), false, String(bad));
+  }
+});
+
+test('translations: every Spanish entry belongs to an English sentence the app still uses', async () => {
+  // Translations are keyed by the English sentence, so rewording the English silently strands the Spanish. Each key must still appear in the code.
+  const es = (await import('../web/src/es.js')).default;
+  const src = ['../web/src', '../shared'].flatMap((d) => { const dir = path.resolve(import.meta.dirname, d); return readdirSync(dir).filter((f) => f.endsWith('.js') && f !== 'es.js').map((f) => readFileSync(path.join(dir, f), 'utf8')); }).join('\n');
+  const used = (k) => [k, k.replace(/'/g, "\\'"), k.replace(/"/g, '\\"')].some((v) => src.includes(v));
+  assert.deepEqual(Object.keys(es).filter((k) => !used(k)), []);
+});
+
+test('what the roster check returns cannot be changed afterwards (keys are sealed only to what it vouched for)', () => {
+  const w = rosterWorld(3, 2);
+  for (const a of [authenticate(w.raw(), w.commit, 'camp-1'), authenticate(w.raw({ roster: null }), w.commit, 'camp-1'), rosterToSign(w.raw({ roster: null }), 'camp-1', w.ts[0].keys, { k: w.raw().k, n: w.raw().n })]) {
+    assert.throws(() => { a.seats = []; }, TypeError);
+    assert.throws(() => { a.seats.push({ index: 9, boxPublicKey: 'x' }); }, TypeError);
+    assert.throws(() => { a.seats[0].boxPublicKey = 'x'; }, TypeError);
+  }
+});
+
+test('mailbox counting: spellings of one inbox count as one', () => {
+  assert.equal(mailboxKey('Victim@Gmail.com.'), mailboxKey('victim@gmail.com'));
+  assert.equal(mailboxKey('v.i.c.t.i.m+x@googlemail.com..'), mailboxKey('victim@gmail.com'));
+  assert.notEqual(mailboxKey('a.b@example.org'), mailboxKey('ab@example.org'));
+});
+
+test('the audit rows on screen are the ones that were checked: only the name comes from the page', () => {
+  const chain = [{ seq: 1, actorId: 'a', action: 'role.add:officer', type: 'member', id: 'x', at: 't1', hash: 'h1' }, { seq: 2, actorId: 'b', action: 'member.pii.read', type: 'member', id: 'y', at: 't2', hash: 'h2' }];
+  const page = [{ ...chain[1], actor: 'Bea' }, { ...chain[0], actor: 'Al' }];
+  assert.deepEqual(auditRows(page, chain, 2).map((r) => [r.seq, r.actor, r.action]), [[2, 'Bea', 'member.pii.read'], [1, 'Al', 'role.add:officer']]);
+  const lied = [{ ...chain[1], action: 'nothing to see', actor: 'Bea' }, { ...chain[0], actorId: 'b', actor: 'Bea' }];
+  const rows = auditRows(lied, chain, 2);
+  assert.deepEqual(rows.map((r) => r.action), ['member.pii.read', 'role.add:officer']); // what is shown comes from the checked chain...
+  assert.equal(rows[1].actor, null); // ...and a name the page attaches to a different person is not shown
+  // a row the server leaves out of its page is still listed, from the chain, just without a name
+  assert.deepEqual(auditRows([{ ...chain[0], actor: 'Al' }], chain, 2).map((r) => [r.seq, r.actor]), [[2, null], [1, 'Al']]);
+});
+
+test('role holders\' keys are remembered per device, and a changed key is reported before anything is sealed to it', () => {
+  const a = C.newKeypairs(), b = C.newKeypairs(), evil = C.newKeypairs();
+  const first = compareKeyPins({}, [{ memberId: 'm1', name: 'Ana', boxPublicKey: a.boxPublicKey }, { memberId: 'm2', name: 'Ben', boxPublicKey: b.boxPublicKey }]);
+  assert.deepEqual(first.changed, []); // first sight: remembered, nothing to report (this cannot catch a key that was false from the start)
+  assert.deepEqual(Object.keys(first.pins).sort(), ['m1', 'm2']);
+  const same = compareKeyPins(first.pins, [{ memberId: 'm1', name: 'Ana', boxPublicKey: a.boxPublicKey }]);
+  assert.deepEqual(same.changed, []);
+  const swapped = compareKeyPins(first.pins, [{ memberId: 'm1', name: 'Ana', boxPublicKey: evil.boxPublicKey }, { memberId: 'm2', name: 'Ben', boxPublicKey: b.boxPublicKey }]);
+  assert.deepEqual(swapped.changed.map((c) => [c.memberId, c.name, c.words]), [['m1', 'Ana', C.keyWords(evil.boxPublicKey)]]);
+  assert.equal(swapped.pins.m1, evil.boxPublicKey); // what to remember if the person confirms they checked it
+  assert.equal(first.pins.m1, a.boxPublicKey); // the old pins are not changed by looking
+});
+
+test('the guide shows the one next step for where a person is, and nothing when there is nothing to do', () => {
+  const base = { status: 'active', isFounder: true, n: 3, joined: 3, confirmed: true, solo: 0, pending: 0, vouched: 2, releaseMin: 6, k: 2 };
+  const step = (o) => organizeStep({ ...base, ...o }).id;
+  assert.equal(step({ joined: 1 }), 'invite-trustees');
+  assert.equal(step({ joined: 1, isFounder: false }), 'wait-trustees');
+  assert.equal(step({ confirmed: false }), 'confirm-committee');
+  assert.equal(step({ solo: 3 }), 'lock-early');
+  assert.equal(step({ pending: 2 }), 'confirm-pending');
+  assert.equal(step({}), 'invite-coworkers');
+  assert.deepEqual(organizeStep(base).vars, { m: 4 });
+  assert.equal(step({ vouched: 6 }), 'open-cards');
+  assert.equal(step({ status: 'frozen' }), 'frozen');
+  assert.match(organizeStep({ ...base, vouched: 6 }).why, /nothing is sent for you/); // it never implies the app files anything
+  const w = { isMember: true, voteNow: null, overdueCase: null, dueTask: null };
+  assert.equal(workspaceStep(w), null); // nothing to do: no card at all
+  assert.equal(workspaceStep({ ...w, voteNow: { id: 'v1', title: 'Dues' } }).href, '/w/votes/v1');
+  assert.equal(workspaceStep({ ...w, overdueCase: { id: 'g1' } }).href, '/w/help/g1');
+  assert.equal(workspaceStep({ ...w, isMember: false }).id, 'join');
+  assert.equal(workspaceStep({ ...w, isMember: false, voteNow: { id: 'v2', title: 'x' } }).id, 'vote-v2'); // the most urgent first
+});
+
+test('ledger check: what is checked, and what category and amount an entry has, come from the verified chain, not the summary', () => {
+  const salt = 's1', commit = C.sha256Text(`${salt}|Real Payee|`);
+  const chain = [{ seq: 1, cat: 'office', cents: 500, commit }];
+  const good = [{ seq: 1, category: 'office', amountCents: 500, payee: 'Real Payee', memo: '', salt }];
+  assert.deepEqual(checkCommitments(good, chain), { ok: true, checked: 1, brokenAt: null });
+  // the server relabels the entry as a redacted category so it is skipped, or changes the amount shown
+  assert.equal(checkCommitments([{ ...good[0], category: 'member_benefits', payee: 'Member', salt: undefined }], chain).ok, false);
+  assert.equal(checkCommitments([{ ...good[0], amountCents: 5 }], chain).ok, false);
+  assert.equal(checkCommitments([], chain).ok, false); // or leaves it out of the summary altogether
 });

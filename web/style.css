@@ -130,6 +130,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand); }
 /* links, codes, entries */
 .link-box { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .85rem; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; padding: .6rem .7rem; overflow-wrap: anywhere; user-select: all; margin: .6rem 0; }
 .passphrase { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 1.15rem; font-weight: 700; background: var(--brand-soft); border: 1px dashed var(--brand); border-radius: 8px; padding: .8rem; overflow-wrap: anywhere; margin: .6rem 0; }
+.keycheck { margin: .8rem 0; padding: .7rem .9rem; border-left: 4px solid var(--gold-strong); background: var(--sunken); border-radius: 0 8px 8px 0; } .keycheck p { margin: .3rem 0; } .keycheck .check { margin-top: .5rem; }
+.keywords { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 1.05rem; font-weight: 700; line-height: 1.7; letter-spacing: .02em; background: var(--card); border: 1px solid var(--line-strong); border-radius: 8px; padding: .55rem .75rem; overflow-wrap: anywhere; user-select: all; margin: .35rem 0; }
 .code { font-family: var(--serif); font-size: 2.2rem; font-weight: 800; letter-spacing: .08em; text-align: center; padding: .6rem; background: var(--card); border: 2px solid var(--gold-strong); border-radius: 8px; margin: .8rem 0; overflow-wrap: anywhere; } .code.small { font-size: 1.15rem; }
 .entry { border-top: 1px solid var(--line); padding: .8rem 0; } .entry:first-of-type { border-top: 0; }
 .vouch span { flex: 1 1 10rem; } .vouch input { flex: 1 1 9rem; text-transform: uppercase; }
@@ -157,3 +159,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 @media (max-width: 420px) { html { font-size: 16.5px; } .top-in { padding: .5rem 12px; } .page { padding: .6rem 12px 2.5rem; } .bar-l { flex-basis: 40%; } .tabs-in { padding: 0 6px; gap: 0; } .tabs a { padding: .8rem .62rem; font-size: .95rem; } h1 { font-size: 1.8rem; } .hero h1 { font-size: 1.9rem; } }
 @media print { :root { color-scheme: light; --bg: #fff; --card: #fff; --paper: #fff; --ink: #000; --line: #999; } .top, .foot, .tabs, .btn, .quick { display: none !important; } body { background: #fff; color: #000; } .card { box-shadow: none; } }
+/* Next-step guide: quiet, one card, and a brief outline on the place it points to */
+.next-step { border: 1px solid var(--line); border-left: 5px solid var(--gold, var(--brand)); background: var(--card); border-radius: 8px; padding: .75rem 1rem; margin: 1rem 0; }
+.next-step .row { margin-top: .4rem; }
+.next-step-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted, inherit); }
+.guide-glow { outline: 3px solid var(--gold, var(--brand)); outline-offset: 4px; transition: outline-color .6s; }
+@media (prefers-reduced-motion: reduce) { .guide-glow { transition: none; } }

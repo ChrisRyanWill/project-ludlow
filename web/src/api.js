@@ -1,13 +1,13 @@
-import { signAuth } from '../../shared/crypto.js';
+import { signAuth, bodyHash } from '../../shared/crypto.js';
 
 export class ApiError extends Error {
   constructor(status, code, extra) { super(code); this.status = status; this.code = code; this.extra = extra; }
 }
 
-export async function api(method, path, { body, auth } = {}) {
+export async function api(method, path, { body, raw, auth } = {}) {
   let r;
   try {
-    r = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    r = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) }, body: raw ?? (body ? JSON.stringify(body) : undefined) });
   } catch { throw new ApiError(0, 'offline'); }
   let j = null;
   try { j = await r.json(); } catch { /* empty body */ }
@@ -16,14 +16,15 @@ export async function api(method, path, { body, auth } = {}) {
 }
 export const bearer = (t) => 'Bearer ' + t;
 
-// A trustee call: fetch a one-time challenge, sign `nonce | route | campaignId` with the trustee's
-// signing key, and send the signature instead of any password. The route string names the action.
+// A trustee call: fetch a one-time challenge, sign `nonce | route | campaignId | SHA-256(body)` with the trustee's
+// signing key, and send the signature instead of any password. The route string names the action; the body is sent exactly as signed.
 export async function tcall(T, route, { body, params = {} } = {}) {
   const [method, pattern] = route.split(' ');
   const path = pattern.replace(/:(\w+)/g, (_, k) => encodeURIComponent(params[k] ?? T.campaignId));
+  const raw = body ? JSON.stringify(body) : '';
   const ch = await api('POST', '/api/auth/challenge');
-  const sig = signAuth(T.keys.signSecretKey, { nonce: ch.nonce, route, scope: T.campaignId });
-  return api(method, path, { body, auth: `Sig ${ch.challengeId}.${T.index}.${sig}` });
+  const sig = signAuth(T.keys.signSecretKey, { nonce: ch.nonce, route, scope: T.campaignId, bodyHash: bodyHash(raw) });
+  return api(method, path, { raw: raw || undefined, auth: `Sig ${ch.challengeId}.${T.index}.${sig}` });
 }
 
 const FRIENDLY = {
@@ -51,5 +52,21 @@ const FRIENDLY = {
   committee_changed: 'The committee just changed. Please try again.',
   founder_only: 'Only the founder (trustee 1) can do that.',
   bad_key: 'This link is missing part of its key. Ask for it to be sent again and copy the whole link.',
+  // The keys the website gave this device did not check out. Nothing is signed, sealed or sent.
+  no_commit: "This invitation is from an older version, so it cannot check the trustees' keys. Ask whoever invited you for a new link.",
+  no_founder: 'The founder has not set up their key yet. Please try again later.',
+  founder_mismatch: 'The keys this website gave your phone do not match your invitation, so nothing was signed or sent. The website may have been tampered with, or the link may have been changed. Tell whoever invited you, in person or by phone, and do not try again from this link.',
+  roster_invalid: 'The committee this website showed is not the one the founder signed, so nothing was signed or sent. The website may have been tampered with. Tell whoever invited you, in person or by phone.',
+  roster_mismatch: 'The committee this website lists does not match the roster that was signed, so nothing was signed or sent. If you were invited to sign a card, the website may have been tampered with: tell whoever invited you, in person or by phone. If you are trustee 1, look again and check your key words.',
+  committee_incomplete: 'Not every trustee has joined yet.',
+  key_changed: 'Nothing was sealed or sent, because someone\'s key changed and it was not confirmed. Check their key words with them in person, then try again.',
+  plan_required: 'Type the number of trustees and the number needed together that you chose. Nothing was signed.',
+  plan_mismatch: 'The website says a different number of trustees, or a different number needed together, than you chose. Nothing was signed. Look at the plan again before you confirm: something may be wrong.',
+  not_founder: 'This invitation is for a trustee, but the website put you in the founder\'s seat. Nothing was set up. Tell trustee 1 in person or by phone.',
+  own_seat_mismatch: 'The website put a key in your own seat that is not yours. Do not confirm the committee: something is wrong. Tell the other trustees.',
+  my_key_missing: 'The committee the founder signed does not contain your key. Talk to trustee 1 before you trust this campaign.',
+  roster_not_confirmed: 'The founder has not confirmed the committee yet.',
+  roster_exists: 'The committee has already been confirmed.',
+  bad_signature: 'That confirmation could not be checked. Please try again.',
 };
 export const friendly = (e) => FRIENDLY[e?.code] || 'Something went wrong. Please try again.';

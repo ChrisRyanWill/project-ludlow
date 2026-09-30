@@ -1,6 +1,6 @@
 # Project Ludlow: one small image, one SQLite file. Mount /data as a volume.
 #   docker build -t project-ludlow .
-#   docker run -p 8787:8787 -v ludlow-data:/data \
+#   docker run -p 127.0.0.1:8787:8787 -v ludlow-data:/data \
 #     -e NODE_ENV=production -e HOST=0.0.0.0 -e APP_BASE_URL=https://your.domain \
 #     -e WORKSPACE_MASTER_KEY=$(openssl rand -base64 32) -e TRUST_PROXY=1 \
 #     -e EMAIL_PROVIDER=postmark -e POSTMARK_SERVER_TOKEN=... -e EMAIL_FROM=... -e CONFIRMATION_REPLY_TO=... \
@@ -29,4 +29,7 @@ RUN mkdir -p /data && chown node:node /data
 VOLUME /data
 EXPOSE 8787
 USER node
+# Liveness only: fetches the home page over loopback. Logs one allowlisted line (method, route, status, ms) per check.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 8787) + '/').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 CMD ["node", "server/index.js"]

@@ -1,17 +1,18 @@
 // Campaign API: zero-knowledge authorization cards. The server stores ciphertext, hashes of bearer
 // tokens, public keys and counts. It never receives a key that opens a card or the campaign metadata.
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { fail } from './http.js';
-import { hashToken, vouchHash, verifyAuth } from '../shared/crypto.js';
+import { fail, fromThisMachine } from './http.js';
+import { hashToken, vouchHash, verifyAuth, verifyRoster, canonicalJson, bodyHash } from '../shared/crypto.js';
 import { issueChallenge, takeChallenge, bearer, sigHeader } from './auth.js';
 import { confirmationEmail } from './mail.js';
+import { makeLimiter } from './rate.js';
 
 const B64 = /^[A-Za-z0-9_-]+$/;
 const isB64 = (s, min, max) => typeof s === 'string' && s.length >= min && s.length <= max && B64.test(s);
 const isTok = (s) => isB64(s, 43, 43); // 32 bytes, base64url
 const isUuid = (s) => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 const isStr = (s, max) => typeof s === 'string' && s.length > 0 && s.length <= max;
-const EMAIL = /^[^\s@<>,;"]{1,64}@[^\s@<>,;"]{1,190}\.[^\s@<>,;"]{2,}$/;
+const EMAIL = /^[^\s@<>,;"]{1,64}@[^\s@<>,;"[\]]{1,190}\.[^\s@<>,;"[\].]{2,}$/; // no address literals ([1.2.3.4]) and no trailing dot
 const TEMPLATE = /^card-v\d+(-[a-z]{2,3})?$/;
 const now = () => new Date().toISOString();
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -22,8 +23,33 @@ export function sweepInactive(db, days) {
   return db.prepare('DELETE FROM campaigns WHERE last_activity_at < ?').run(cutoff).changes;
 }
 
+// The mailbox an address reaches, for counting only: case, a "+tag" and (for Gmail) dots do not make it a different inbox.
+export function mailboxKey(address) {
+  const [local, domain0] = String(address).trim().toLowerCase().split(/@(?=[^@]*$)/);
+  const domain = (domain0 || '').replace(/\.+$/, ''); // 'gmail.com.' is the same place as 'gmail.com'
+  let user = (local || '').split('+')[0];
+  const d = domain === 'googlemail.com' ? 'gmail.com' : domain;
+  if (d === 'gmail.com') user = user.replace(/\./g, '');
+  return user + '@' + d;
+}
+
 export function campaignRoutes({ router, db, cfg, mail }) {
   const R = (method, pattern, opts, handler) => router.add(method, pattern, opts, handler);
+  // One address gets at most three confirmations a day. Counted in memory only, under a salt that rotates daily: nothing about the address is stored.
+  const perRecipient = makeLimiter({ disabled: cfg.rateLimitDisabled, windowMs: 86_400_000, max: 3 });
+  // What one campaign has made go out today, also in memory: counting rows in the database would forget every card that was withdrawn since.
+  // A slot is reserved only when every other check has passed, and given back if the email could not be sent.
+  const sentToday = new Map(); // campaignId -> { n, reset }
+  const campaignSlot = (id, delta) => {
+    const t = Date.now();
+    if (sentToday.size > 10_000) for (const [k, v] of sentToday) if (v.reset < t) sentToday.delete(k);
+    let e = sentToday.get(id);
+    if (!e || e.reset < t) { e = { n: 0, reset: t + 86_400_000 }; sentToday.set(id, e); }
+    if (delta > 0 && e.n >= cfg.confirmationsPerCampaignPerDay) return false;
+    e.n = Math.max(0, e.n + delta);
+    return true;
+  };
+  const sending = new Set(); // cards whose confirmation is on its way, so a second request at the same moment cannot send it twice
   const touch = (id) => db.prepare('UPDATE campaigns SET last_activity_at=? WHERE id=?').run(now(), id);
 
   // A trustee proves who they are by signing a fresh challenge; returns the trustee's index.
@@ -33,7 +59,7 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const nonce = takeChallenge(a.challengeId);
     if (!nonce) fail(401, 'bad_challenge');
     const t = db.prepare('SELECT sign_public_key k FROM trustees WHERE campaign_id=? AND trustee_index=? AND sign_public_key IS NOT NULL').get(campaignId, Number(a.index));
-    if (!t || !verifyAuth(t.k, a.sig, { nonce, route, scope: campaignId })) fail(401, 'bad_signature');
+    if (!t || !verifyAuth(t.k, a.sig, { nonce, route, scope: campaignId, bodyHash: bodyHash(ctx.rawBody) })) fail(401, 'bad_signature'); // the body is signed too
     return Number(a.index);
   }
   function cardByToken(ctx) {
@@ -82,12 +108,14 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const who = authorizeMeta(ctx, id); // authenticate first so unknown ids and bad tokens look identical
     const c = db.prepare('SELECT * FROM campaigns WHERE id=?').get(id);
     if (!c) fail(404, 'not_found');
-    const trustees = db.prepare('SELECT trustee_index i, box_public_key pk, enrolled_at e FROM trustees WHERE campaign_id=? ORDER BY trustee_index').all(id);
+    const trustees = db.prepare('SELECT trustee_index i, box_public_key pk, sign_public_key sk, enrolled_at e FROM trustees WHERE campaign_id=? ORDER BY trustee_index').all(id);
     const idleDays = Math.floor((Date.now() - Date.parse(c.last_activity_at)) / 86400_000);
     return {
       id, status: c.status, k: c.threshold_k, n: c.trustee_count_n, metaCiphertext: c.meta_ciphertext, metaNonce: c.meta_nonce,
       templateVersion: c.card_template_version, releaseMin: c.release_min, createdAt: c.created_at,
-      trustees: trustees.map((t) => ({ index: t.i, enrolled: !!t.e, boxPublicKey: t.pk })),
+      // Browsers do not take these on trust: they check the founder's keys against the invitation link and the roster against the founder's signature (shared/roster.js).
+      trustees: trustees.map((t) => ({ index: t.i, enrolled: !!t.e, boxPublicKey: t.pk, signPublicKey: t.sk })),
+      roster: c.roster_json ? { roster: JSON.parse(c.roster_json), signature: c.roster_sig } : null,
       inactivityDaysLeft: Math.max(0, cfg.inactivityDays - idleDays), inactivityWarn: idleDays >= cfg.inactivityDays - 30,
       ...(who.enrollIndex ? { yourTrusteeIndex: who.enrollIndex } : {}),
     };
@@ -98,6 +126,9 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     return db.transaction(() => {
       const t = db.prepare('SELECT id, trustee_index i FROM trustees WHERE campaign_id=? AND enrollment_token_hash=?').get(b.campaignId, hashToken(b.enrollToken));
       if (!t) fail(401, 'unauthorized');
+      // The same keys can never fill two seats. This is only a cheap guard (someone can still make a second key file), which is why the
+      // founder also confirms each seat's key words with the person before locking cards to the committee.
+      if (db.prepare('SELECT 1 FROM trustees WHERE campaign_id=? AND enrolled_at IS NOT NULL AND (box_public_key=? OR sign_public_key=?)').get(b.campaignId, b.boxPublicKey, b.signPublicKey)) fail(409, 'key_reused');
       db.prepare('UPDATE trustees SET box_public_key=?, sign_public_key=?, enrolled_at=?, enrollment_token_hash=NULL WHERE id=?').run(b.boxPublicKey, b.signPublicKey, now(), t.id);
       // The founder's key is enough to start collecting cards; the rest of the committee can join later.
       if (db.prepare('SELECT 1 FROM trustees WHERE campaign_id=? AND trustee_index=1 AND enrolled_at IS NOT NULL').get(b.campaignId)) {
@@ -165,16 +196,17 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     if (!isUuid(b.cardId) || !isTok(b.inviteToken) || !isB64(b.ciphertext, 16, 30000) || !isB64(b.nonce, 32, 32)
       || !isTok(b.memberTokenHash) || !isTok(b.disavowTokenHash) || !TEMPLATE.test(b.templateVersion) || !Array.isArray(b.sealedShares)) fail(400, 'bad_request');
     return db.transaction(() => {
-      const inv = db.prepare(`SELECT i.*, c.status cstatus, c.trustee_count_n n, c.card_template_version tv
+      const inv = db.prepare(`SELECT i.*, c.status cstatus, c.trustee_count_n n, c.card_template_version tv, c.roster_json rj
         FROM invites i JOIN campaigns c ON c.id=i.campaign_id WHERE i.token_hash=?`).get(hashToken(b.inviteToken));
       if (!inv || inv.revoked_at || inv.expires_at <= now() || inv.use_count >= inv.max_uses) fail(404, 'invalid_invite');
       if (inv.cstatus !== 'active') fail(409, 'campaign_not_active');
       if (b.templateVersion !== inv.tv && !b.templateVersion.startsWith(inv.tv + '-')) fail(400, 'bad_template');
-      // Until every trustee has joined, a card is sealed to the founder alone ('solo'); after that it is split k-of-n.
-      // If the committee changed while the signer was typing, they get 409 and their browser seals it again.
+      // A card is sealed to the founder alone ('solo') until the founder has signed the roster of the whole committee, and split k-of-n after that.
+      // (Every trustee having joined is not enough: a browser can only trust keys the founder vouched for.) If that changed while the signer was typing,
+      // they get 409 and their browser seals it again.
       const enrolled = db.prepare('SELECT trustee_index i FROM trustees WHERE campaign_id=? AND enrolled_at IS NOT NULL').all(inv.campaign_id).map((r) => r.i);
       const solo = b.sealMode === 'solo';
-      if (solo === (enrolled.length === inv.n)) fail(409, 'committee_changed');
+      if (solo === !!inv.rj) fail(409, 'committee_changed');
       const idx = b.sealedShares.map((s) => s?.trusteeIndex);
       if (solo) {
         if (b.sealedShares.length !== 1 || idx[0] !== 1 || !enrolled.includes(1) || !isB64(b.sealedShares[0].sealed, 60, 300)) fail(400, 'bad_shares');
@@ -208,10 +240,22 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const b = ctx.body;
     if (!isStr(b.to, 254) || !EMAIL.test(b.to) || !isStr(b.legalName, 120) || !isStr(b.phone, 32) || !isStr(b.employerName, 200)
       || !isStr(b.unionName, 200) || !isStr(b.cardText, 4000) || !isTok(b.disavowToken) || !equal(hashToken(b.disavowToken), card.disavow_token_hash)) fail(400, 'bad_request');
+    // Anyone can start a campaign and sign a card, so this route must not become a way to send mail from this server to arbitrary people:
+    // limit what one address can receive, and how much one campaign can make go out in a day.
+    if (sending.has(card.id)) fail(409, 'already_sent');
+    const since = new Date(Date.now() - 86400_000).toISOString();
+    if (db.prepare('SELECT COUNT(*) c FROM cards WHERE campaign_id=? AND confirmation_sent_at > ?').get(card.campaign_id, since).c >= cfg.confirmationsPerCampaignPerDay) fail(429, 'confirmations_capped');
+    const today = sentToday.get(card.campaign_id);
+    if (today && today.reset > Date.now() && today.n >= cfg.confirmationsPerCampaignPerDay) fail(429, 'confirmations_capped');
+    if (!perRecipient(mailboxKey(b.to))) fail(429, 'too_many_for_this_address');
+    if (!campaignSlot(card.campaign_id, 1)) fail(429, 'confirmations_capped');
     const email = confirmationEmail({ appName: cfg.appName, baseUrl: cfg.baseUrl, card: b, signedAt: card.created_at, cardId: card.id, disavowToken: b.disavowToken, templateVersion: card.template_version });
     let sent;
-    try { sent = await mail.send({ to: b.to, subject: email.subject, text: email.text, replyTo: cfg.replyTo }); } catch { fail(502, 'email_failed'); }
-    db.prepare('UPDATE cards SET confirmation_sent_at=?, confirmation_message_id=? WHERE id=?').run(now(), String(sent.messageId).slice(0, 100), card.id);
+    sending.add(card.id);
+    try {
+      try { sent = await mail.send({ to: b.to, subject: email.subject, text: email.text, replyTo: cfg.replyTo }); } catch { campaignSlot(card.campaign_id, -1); fail(502, 'email_failed'); }
+      db.prepare('UPDATE cards SET confirmation_sent_at=?, confirmation_message_id=? WHERE id=?').run(now(), String(sent.messageId).slice(0, 100), card.id);
+    } finally { sending.delete(card.id); }
     return { sent: true };
   });
 
@@ -291,6 +335,18 @@ export function campaignRoutes({ router, db, cfg, mail }) {
       history: db.prepare("SELECT substr(created_at,1,10) d, COUNT(*) c FROM cards WHERE campaign_id=? AND status='vouched' AND disavowed_at IS NULL GROUP BY d ORDER BY d").all(id).map((r) => ({ day: r.d, count: r.c })),
     };
     if (trustee) {
+      // Where the count comes from (#38). Anyone who can make direct invitations adds cards that count at once, so the release number is only as
+      // good as the people behind it; this lets the trustees see if one person accounts for much of it. Counts only: no signer is named.
+      const rows = db.prepare(`SELECT i.kind k, i.created_by_trustee_index t, i.created_by_card_id m, COUNT(*) c FROM cards c JOIN invites i ON i.id=c.invite_id
+        WHERE c.campaign_id=? AND c.status='vouched' AND c.disavowed_at IS NULL GROUP BY i.kind, i.created_by_trustee_index, i.created_by_card_id`).all(id);
+      const pv = { byTrustee: {}, byMembers: 0, membersInviting: 0, mostFromOneMember: 0, confirmedInPerson: 0, other: 0 };
+      for (const r of rows) {
+        if (r.k === 'group') pv.confirmedInPerson += r.c;
+        else if (r.t != null) pv.byTrustee[r.t] = (pv.byTrustee[r.t] || 0) + r.c;
+        else if (r.m != null) { pv.byMembers += r.c; pv.membersInviting++; pv.mostFromOneMember = Math.max(pv.mostFromOneMember, r.c); }
+        else pv.other += r.c; // the member who invited them has since withdrawn
+      }
+      out.provenance = pv;
       out.destroyApprovals = count('SELECT COUNT(*) c FROM destroy_approvals WHERE campaign_id=?');
       out.reports = count('SELECT COUNT(*) c FROM reports WHERE campaign_id=?');
       const votes = db.prepare('SELECT trustee_index i, value v FROM release_approvals WHERE campaign_id=?').all(id);
@@ -324,7 +380,9 @@ export function campaignRoutes({ router, db, cfg, mail }) {
   R('POST', '/api/reports', { strict: true, maxBody: 200_000 }, (ctx) => {
     const card = cardByToken(ctx);
     const b = ctx.body;
-    const joined = db.prepare('SELECT trustee_index i FROM trustees WHERE campaign_id=? AND enrolled_at IS NOT NULL').all(card.campaign_id).map((r) => r.i);
+    // A browser can only seal to keys it can authenticate: the founder's (from the invitation link), and the whole committee once the founder has signed the roster.
+    const cmp = db.prepare('SELECT trustee_count_n n, roster_json rj FROM campaigns WHERE id=?').get(card.campaign_id);
+    const joined = cmp.rj ? Array.from({ length: cmp.n }, (_, i) => i + 1) : [1];
     if (!isUuid(b.id) || !isB64(b.ciphertext, 16, 30000) || !isB64(b.nonce, 32, 32) || !Array.isArray(b.sealedKeys) || b.sealedKeys.length !== joined.length
       || !b.sealedKeys.every((s) => Number.isInteger(s?.trusteeIndex) && joined.includes(s.trusteeIndex) && isB64(s.sealed, 60, 300)) || new Set(b.sealedKeys.map((s) => s.trusteeIndex)).size !== joined.length) fail(409, 'committee_changed');
     try {
@@ -392,12 +450,41 @@ export function campaignRoutes({ router, db, cfg, mail }) {
   // A fresh invitation for a trustee seat that has not been taken (also revokes any earlier, possibly leaked, link).
   R('POST', '/api/campaigns/:id/trustees/reset', { strict: true }, (ctx) => {
     const id = ctx.params.id;
-    authTrustee(ctx, 'POST /api/campaigns/:id/trustees/reset', id);
+    // Seats are the founder's to hand out. If any trustee could re-issue an empty seat, one person could take enough seats to hold k shares
+    // alone (and approve lowering the release number k times), which would defeat both the k-of-n rule and the release lock.
+    if (authTrustee(ctx, 'POST /api/campaigns/:id/trustees/reset', id) !== 1) fail(403, 'founder_only');
     const { index, tokenHash } = ctx.body;
     if (!Number.isInteger(index) || !isTok(tokenHash)) fail(400, 'bad_request');
     const r = db.prepare('UPDATE trustees SET enrollment_token_hash=? WHERE campaign_id=? AND trustee_index=? AND enrolled_at IS NULL').run(tokenHash, id, index);
     if (r.changes !== 1) fail(409, 'slot_taken');
     return { ok: true };
+  });
+
+  // The founder signs the committee once every trustee has joined and they have checked each one's key words with them (docs/PROTOCOL.md 1a).
+  // The server stores it and flips new cards to k-of-n, but it cannot forge one: browsers verify the founder's signature themselves. Checking it here too
+  // only keeps a mistaken or corrupted roster out.
+  R('POST', '/api/campaigns/:id/roster', { strict: true }, (ctx) => {
+    const id = ctx.params.id;
+    if (authTrustee(ctx, 'POST /api/campaigns/:id/roster', id) !== 1) fail(403, 'founder_only');
+    const signature = ctx.body.signature;
+    if (!ctx.body.roster || typeof signature !== 'string' || signature.length > 200) fail(400, 'bad_request');
+    return db.transaction(() => {
+      const c = db.prepare('SELECT trustee_count_n n, threshold_k k, roster_json rj FROM campaigns WHERE id=?').get(id);
+      if (!c) fail(404, 'not_found');
+      const ts = db.prepare('SELECT trustee_index i, box_public_key pk, sign_public_key sk, enrolled_at e FROM trustees WHERE campaign_id=? ORDER BY trustee_index').all(id);
+      if (ts.length !== c.n || ts.some((t) => !t.e)) fail(409, 'committee_incomplete');
+      const held = { campaignId: id, k: c.k, n: c.n, seats: ts.map((t) => ({ index: t.i, boxPublicKey: t.pk })) };
+      const sent = ctx.body.roster;
+      if (canonicalJson({ campaignId: sent.campaignId, k: sent.k, n: sent.n, seats: Array.isArray(sent.seats) ? sent.seats.map((s) => ({ index: s?.index, boxPublicKey: s?.boxPublicKey })) : null }) !== canonicalJson(held)) fail(400, 'roster_mismatch');
+      if (!verifyRoster(ts[0].sk, signature, held)) fail(400, 'bad_signature');
+      if (c.rj) { // already signed: the same roster again is fine (a retry), a different one is not
+        if (c.rj === JSON.stringify(held)) return { confirmed: true, already: true };
+        fail(409, 'roster_exists');
+      }
+      db.prepare('UPDATE campaigns SET roster_json=?, roster_sig=? WHERE id=?').run(JSON.stringify(held), signature, id);
+      touch(id);
+      return { confirmed: true };
+    })();
   });
 
   // Cards still sealed to the founder alone, so the founder can re-lock them to the whole committee.
@@ -413,12 +500,12 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const cards = ctx.body.cards;
     if (!Array.isArray(cards) || cards.length < 1 || cards.length > 500) fail(400, 'bad_request');
     return db.transaction(() => {
-      const c = db.prepare('SELECT trustee_count_n n FROM campaigns WHERE id=?').get(id);
+      const c = db.prepare('SELECT trustee_count_n n, roster_json rj FROM campaigns WHERE id=?').get(id);
       if (!c) fail(404, 'not_found');
-      if (enrolledCount(id) !== c.n) fail(409, 'committee_incomplete');
+      if (!c.rj) fail(409, 'roster_not_confirmed'); // the founder signs the roster first; that is what makes new cards k-of-n, so the set of solo cards stops growing
       for (const item of cards) {
         const idx = Array.isArray(item?.sealedShares) ? item.sealedShares.map((s) => s?.trusteeIndex) : [];
-        if (!isUuid(item?.cardId) || item.sealedShares.length !== c.n || !item.sealedShares.every((s) => Number.isInteger(s?.trusteeIndex) && isB64(s.sealed, 60, 300))
+        if (!isUuid(item?.cardId) || !Array.isArray(item.sealedShares) || item.sealedShares.length !== c.n || !item.sealedShares.every((s) => Number.isInteger(s?.trusteeIndex) && isB64(s.sealed, 60, 300))
           || new Set(idx).size !== c.n || idx.some((i) => i < 1 || i > c.n)) fail(400, 'bad_shares');
         const r = db.prepare("UPDATE cards SET sealed_shares=?, seal_mode='shamir' WHERE id=? AND campaign_id=? AND seal_mode='solo'")
           .run(JSON.stringify(item.sealedShares.map((s) => ({ trusteeIndex: s.trusteeIndex, sealed: s.sealed }))), item.cardId, id);
@@ -482,5 +569,6 @@ export function campaignRoutes({ router, db, cfg, mail }) {
   });
 
   // Development only: an in-memory outbox so you can read the Confirmation Transmission without email.
-  if (mail.outbox && !cfg.production) R('GET', '/dev/outbox', {}, () => ({ messages: mail.outbox }));
+  // Only to a browser on this machine: on a server others can reach, the messages hold signers' names and addresses.
+  if (mail.outbox && !cfg.production) R('GET', '/dev/outbox', {}, ({ req }) => { if (!fromThisMachine(req)) fail(404, 'not_found'); return { messages: mail.outbox }; });
 }

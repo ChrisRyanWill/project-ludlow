@@ -61,11 +61,12 @@ async function readJson(req, limit) {
   const chunks = [];
   let n = 0;
   for await (const c of req) { n += c.length; if (n > limit) fail(413, 'too_large'); chunks.push(c); }
-  if (!n) return {};
+  if (!n) return { v: {}, raw: '' };
+  const raw = Buffer.concat(chunks).toString('utf8');
   let v;
-  try { v = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { fail(400, 'bad_json'); }
+  try { v = JSON.parse(raw); } catch { fail(400, 'bad_json'); }
   if (v === null || typeof v !== 'object' || Array.isArray(v)) fail(400, 'bad_json');
-  return v;
+  return { v, raw }; // the exact text too: a trustee's signature covers it
 }
 
 const staticCache = new Map();
@@ -107,13 +108,22 @@ async function serveStatic(req, res, url, dir) {
   return res.end(req.method === 'HEAD' ? undefined : body);
 }
 
-function clientIp(req, cfg) {
-  if (cfg.trustProxy) {
-    const fwd = req.headers['fly-client-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+// Behind N trusted proxies, each one APPENDS the address it saw, so whatever a client writes into X-Forwarded-For itself sits at the front and cannot be
+// trusted. Count from the end: with one proxy the last entry is the real client. Fewer entries than proxies means the header was not set by them.
+export function clientIp(req, cfg) {
+  const hops = cfg.trustProxy === true ? 1 : Number(cfg.trustProxy) || 0;
+  if (hops > 0) {
+    const parts = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const fwd = parts[parts.length - hops]; // no vendor headers (Fly-Client-IP and the like): behind any other proxy they are whatever the client wrote
     if (fwd) return fwd;
   }
   return req.socket.remoteAddress || 'unknown';
 }
+
+// A request made on this machine directly, not passed on by a proxy (which would connect from this machine too). Used only for development pages.
+const LOOPBACK = /^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|::ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3})$/;
+export const fromThisMachine = (req) => LOOPBACK.test(String(req.socket?.remoteAddress || ''))
+  && !req.headers['x-forwarded-for'] && !req.headers.forwarded && !req.headers['x-real-ip'];
 
 export function createHttpServer({ router, cfg, limiter }) {
   return http.createServer(async (req, res) => {
@@ -128,8 +138,8 @@ export function createHttpServer({ router, cfg, limiter }) {
         if (!m) { route = '(unmatched)'; return send(res, 404, { error: 'not_found' }); }
         route = m.route.pattern; // the pattern, never the raw path (which may contain ids)
         if (!limiter(clientIp(req, cfg), m.route.opts.strict)) return send(res, 429, { error: 'rate_limited' });
-        const body = req.method === 'GET' || req.method === 'HEAD' ? {} : await readJson(req, m.route.opts.maxBody || 1_000_000);
-        const out = await m.route.handler({ req, params: m.params, body, query: Object.fromEntries(url.searchParams), headers: req.headers });
+        const { v: body, raw: rawBody } = req.method === 'GET' || req.method === 'HEAD' ? { v: {}, raw: '' } : await readJson(req, m.route.opts.maxBody || 1_000_000);
+        const out = await m.route.handler({ req, params: m.params, body, rawBody, query: Object.fromEntries(url.searchParams), headers: req.headers });
         return send(res, 200, out ?? {});
       }
       return await serveStatic(req, res, url, cfg.staticDir);

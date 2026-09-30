@@ -5,7 +5,10 @@ import { api } from './api.js';
 import { store } from './store.js';
 import { t } from './i18n.js';
 import { packOf } from './packs.js';
-import { verifyChain, auditFields } from '../../shared/verify.js';
+import { verifyChain, auditFields, checkPinned, auditRows } from '../../shared/verify.js';
+import { nextStepCard } from './guide.js';
+import { workspaceStep } from '../../shared/guide.js';
+import { plainMd } from './format.js';
 import { ASSIGNABLE_ROLES } from '../../shared/permissions.js';
 import { POLICY_FIELDS } from '../../shared/constants.js';
 import { keyFilePicker, linkTo, label3, loadMeta } from './organize.js';
@@ -13,7 +16,7 @@ import { claimsView } from './founding.js';
 import { WS, setWS, signIn, wcall, refreshMe, can, has, wsInfo, currency, wsFrame, urgencyBadge } from './wsbase.js';
 import {
   div, span, p, a, ul, li, h1, h2, h3, strong, input, textarea, details, summary, table, thead, tbody, tr, td, th, mark,
-  btn, callout, badge, field, textInput, selectBox, linkBtn, shell, setTitle, view, fragment, go, act, toast, copy, download, md, money, fmtDate, fmtDateTime, ago, render,
+  btn, callout, badge, field, textInput, selectBox, linkBtn, shell, setTitle, view, fragment, go, act, toast, copy, download, md, money, fmtDate, fmtDateTime, ago, render, scrubFragment,
 } from './ui.js';
 
 const wait = (ms = 40) => new Promise((r) => setTimeout(r, ms));
@@ -28,6 +31,7 @@ export async function ClaimPage() {
   if (!c || !w) return bad(t('This link is incomplete. Ask for it to be sent again, and copy the whole link.'));
   let info;
   try { info = await api('POST', '/api/ws/claim-info', { body: { workspaceId: w, claimToken: c } }); } catch { return bad(t('This link was already used or is not valid. If you already claimed your account, sign in with your key file.')); }
+  scrubFragment(); // the claim token is in memory now; don't leave it in the address bar and the browser's history
   const S = { pass: C.generatePassphrase(), own: false, made: null, saved: false };
   return shell(div({ class: 'wrap' }, view((update) => div(
     h1(t('Welcome to {union}', { union: info.unionName })),
@@ -38,7 +42,7 @@ export async function ClaimPage() {
         : div(div({ class: 'passphrase', tabindex: 0 }, S.pass), div({ class: 'row' }, btn(t('Copy'), () => copy(S.pass), { kind: 'secondary small' }), btn(t('Another one'), () => { S.pass = C.generatePassphrase(); update(); }, { kind: 'secondary small' }), btn(t('I will choose my own'), () => { S.own = true; S.pass = ''; update(); }, { kind: 'secondary small' })))),
     div({ class: 'card' }, h2(t('2. Save your key file')),
       btn(S.made ? t('Download the key file again') : t('Create my key file'), act(async () => {
-        if (!C.passphraseOk(S.pass)) return toast(t('Your passphrase must be at least 14 characters.'), 'bad');
+        if (!C.passphraseOk(S.pass)) return toast(t('Your passphrase must be at least 14 characters and not a simple pattern (the same letters or words again, or a run like 12345). The generated one is best.'), 'bad');
         if (!S.made) {
           await wait(60);
           const keys = C.newKeypairs();
@@ -90,7 +94,9 @@ async function homeTab() {
   return wsFrame('home', view((update) => div(
     h1(t('Hello, {name}', { name: info.member.name.split(' ')[0] })),
     p({ class: 'muted' }, info.roles.filter((r) => ROLE_NAMES[r]).map((r) => t(ROLE_NAMES[r])).join(', ') || t('Unit employee')),
-    !info.roles.includes('member') ? callout('info', t('You are a unit employee. You can get help and see the contract no matter what. To vote and see the union\'s money, join the union.'), ' ', btn(t('Join the union'), act(async () => { await wcall('POST', '/api/ws/me/join'); render(); }), { kind: 'primary small' })) : null,
+    nextStepCard(workspaceStep({ isMember: info.roles.includes('member'), voteNow: forMe[0] || null, overdueCase: mine.find((g) => g.urgency?.left < 0) || null,
+      dueTask: soon.find((x) => x.urgency.left <= 14) || null }), `w.${WS.workspaceId}`),
+    !info.roles.includes('member') ? div({ id: 'g-join' }, callout('info', t('You are a unit employee. You can get help and see the contract no matter what. To vote and see the union\'s money, join the union.'), ' ', btn(t('Join the union'), act(async () => { await wcall('POST', '/api/ws/me/join'); render(); }), { kind: 'primary small' }))) : null,
     div({ class: 'grid2' },
       div({ class: 'card' }, h2(t('What is happening')),
         forMe.length ? forMe.map((v) => div({ class: 'row between' }, span(strong(v.title), ' ', span({ class: 'small muted' }, t('closes {d}', { d: fmtDate(v.closesAt) }))), linkBtn(t('Vote now'), `/w/votes/${v.id}`, 'primary small'))) : p({ class: 'muted' }, open.length ? t('You have voted on everything that is open.') : t('No votes are open right now.')),
@@ -118,7 +124,7 @@ function bylawsMd(w) {
   const P = w.policy;
   return `> **DRAFT: REQUIRES REVIEW BY A LICENSED LABOR ATTORNEY BEFORE REAL-WORLD USE**
 
-# Rules of ${w.unionName}
+# Rules of ${plainMd(w.unionName)}
 
 These rules are enforced by the software. They can only be changed by a vote of the members.
 
@@ -131,7 +137,7 @@ We represent every employee in the bargaining unit fairly, whether or not they a
 - These rules change only when the members pass an amendment by vote.
 
 ## 3. Votes
-All votes are by secret ballot. After every vote, any member can recount the ballots and check their receipt.
+All votes are by secret ballot. When the election committee publishes a vote's ballot key, and it always does for a decision that changes dues, rules or roles, any member can recount the ballots and check their receipt.
 
 ## 4. Officers
 Officers serve terms of ${P.termMonths} months. Election procedures must be reviewed before your first election. TODO(lawyer): add nomination, notice and mail-ballot procedures for officer elections; federal rules for union officer elections are strict.
@@ -151,8 +157,14 @@ export const UnionTab = async () => {
   const audit = can('audit.read_all') ? await wcall('GET', '/api/ws/audit') : null;
   const comp = can('compliance.read') ? (await wcall('GET', '/api/ws/compliance')).tasks : null;
   const me = WS.info.member;
+  const shown = audit ? audit.entries.slice(0, 100) : []; // entries listed on screen, newest first; more on request
   const S = { role: 'steward', who: roster?.[0]?.id, csv: '', claims: null, phone: me.phone || '', address: me.address || '', job: me.jobTitle || '', shift: me.shift || '' };
-  const chain = audit ? verifyChain([...audit.entries].reverse(), auditFields, { anchored: audit.entries.length < 500 }) : null;
+  const auditList = audit ? audit.chain : null; // every entry since the first, oldest first: the whole log is checked, not only the page shown
+  const chain = audit ? verifyChain(auditList, auditFields, { anchored: true }) : null;
+  // Like the ledger, this device remembers the newest audit entry it has seen, so a rewritten log (which a chain check alone cannot notice) is caught on a later visit.
+  const auditPinKey = `pin.audit.${WS.workspaceId}`, auditPin = store.get(auditPinKey);
+  const auditPinned = chain?.ok ? checkPinned(auditList, auditPin) : { ok: false };
+  if (chain?.ok && auditPinned.ok && chain.head && (!auditPin || chain.head.seq > auditPin.seq)) store.set(auditPinKey, chain.head);
   return wsFrame('union', view((update) => div(
     h1(t('Your union')),
     details({ open: true, class: 'card' }, summary(t('Our rules (bylaws)')), md(bylawsMd(w)),
@@ -190,6 +202,13 @@ export const UnionTab = async () => {
     can('export.all') ? div({ class: 'card' }, h3(t('Your data belongs to the union')), p({ class: 'small muted' }, t('Download everything: members, roles, votes, the whole ledger, rules and the audit log. Private cases stay encrypted, and only the people who hold their keys can read them. The download itself is recorded in the audit log.')),
       btn(t('Export everything (JSON)'), act(async () => { const data = await wcall('GET', '/api/ws/export'); download(`ludlow-export-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2), 'application/json'); toast(t('Exported. This file contains personal information: keep it private.')); }), { kind: 'secondary' })) : null,
     audit ? details({ class: 'card' }, summary(t('Audit log')),
-      chain.ok ? callout('ok', t('Checked in your browser: {n} recent entries form an unbroken chain. Nothing has been changed or removed.', { n: chain.count })) : callout('danger', t('The audit log has been tampered with near entry {n}. Do not trust it.', { n: chain.brokenAt })),
-      div({ class: 'table-wrap' }, table({ class: 'table small' }, thead(tr(th('#'), th(t('Who')), th(t('What')), th(t('When')))), tbody(audit.entries.slice(0, 100).map((e) => tr(td(e.seq), td(e.actor || '—'), td(e.action), td(ago(e.at)))))))) : null)));
+      !chain.ok ? callout('danger', t('The audit log has been tampered with near entry {n}. Do not trust it.', { n: chain.brokenAt }))
+        : !auditPinned.ok ? callout('danger', strong(t('The history changed.')), ' ', t('On an earlier visit this device saw audit entries that are now different or missing. Someone may have rewritten the log. Tell your members right away.'))
+          : auditPinned.first ? callout('info', t('Checked in your browser: all {n} entries form an unbroken chain from the first. This is the first check on this device, so it cannot yet tell whether entries were rewritten before today. Later visits will.', { n: chain.count }))
+            : callout('ok', t('Checked in your browser: all {n} entries form an unbroken chain from the first, and entries this device saw before have not changed.', { n: chain.count })),
+      div({ class: 'table-wrap' }, table({ class: 'table small' }, thead(tr(th('#'), th(t('Who')), th(t('What')), th(t('When')))), tbody(auditRows(audit.entries.concat(shown.slice(audit.entries.length)), audit.chain, shown.length).map((r) => tr(td(r.seq), td(r.actor || '—'), td(r.ok ? r.action : span(r.action, ' ', badge(t('not in the checked log'), 'bad'))), td(ago(r.at)))))),
+        shown.length && shown.at(-1).seq > 1 ? btn(t('Show older entries'), act(async () => {
+          const more = shown.length < audit.entries.length ? audit.entries.slice(shown.length, shown.length + 100) : (await wcall('GET', `/api/ws/audit?before=${shown.at(-1).seq}`)).entries.slice(0, 100);
+          shown.push(...more); update();
+        }), { kind: 'secondary small' }) : null)) : null)));
 };

@@ -11,23 +11,23 @@ export function HomePage() {
   return shell(div({ class: 'wrap' },
     div({ class: 'hero' },
       h1(t('Start a union at your workplace, safely.')),
-      p({ class: 'lead' }, t('Collect signed authorization cards that only your own committee can ever read. Then run your union openly and fairly, with tools that let every member check the work.')),
+      p({ class: 'lead' }, t('Collect signed authorization cards that are locked so only your own committee can open them. Then run your union openly and fairly, with tools that let every member check the work.')),
       div({ class: 'row' }, linkBtn(t('Start a campaign'), '/start', 'primary'), linkBtn(t('Open my union workspace'), '/w', 'secondary')),
       p({ class: 'small muted' }, t('Got an invitation link from a coworker? Just open it. You do not need an account.'))),
     div({ class: 'card' },
       h2(t('How it works')),
       ul({ class: 'steps' },
-        li(strong(t('A few trusted coworkers become trustees.')), ' ', t('You can start alone and add them as you go. Once your committee is complete, any group of them, for example 3 of 5, can open the cards, and only after enough people have signed. No one alone can.')),
-        li(strong(t('Coworkers sign on their own phones.')), ' ', t('Each card is locked on the phone before it is sent. This website only ever sees scrambled data.')),
+        li(strong(t('A few trusted coworkers become trustees.')), ' ', t('You can start alone and add them as you go. Until every trustee has joined and you have confirmed the committee, only you can open the cards. After that, any group of them, for example 3 of 5, can open the cards, and only after enough people have signed. No one alone can.')),
+        li(strong(t('Coworkers sign on their own phones.')), ' ', t('Each card is locked on the phone before it is sent. This website stores only scrambled data.')),
         li(strong(t('You decide when to go public.')), ' ', t('When you have enough support, the trustees open the cards together and get a package to review: a roster, the cards, and draft letters and forms.')),
         li(strong(t('Then run the union in the open.')), ' ', t('Votes, money and workplace cases, built so that every member can check that they were done fairly.')))),
     div({ class: 'card' },
       h2(t('Built so you do not have to trust us')),
       ul(
-        li(t('Cards are encrypted in the browser. Not even this website can read them.')),
-        li(t('Votes are secret, and after a vote every member can recount the ballots themselves.')),
+        li(t('Cards are encrypted in the browser, and this website holds no key that opens them. It sees a signer\'s details only once, to send the confirmation email US labor board guidance calls for, and then discards them.')),
+        li(t('Votes are secret. When the committee publishes the ballot key (always, for decisions the system carries out), every member can recount the ballots themselves.')),
         li(t('The union\'s books are a chain that cannot be quietly edited. Your browser checks it.')),
-        li(t('Spending needs two officers. Members can force a vote or a recall by petition.')),
+        li(t('Large spending needs two officers to approve. Members can force a vote or a recall by petition.')),
         li(t('You can run your own copy of the server and export everything at any time.')))),
     callout('info', strong(t('This is a tool.')), ' ', t('It is not a union and not a law firm. It never files anything or contacts your employer for you. Everything it produces is a draft for people to review.'))));
 }
@@ -72,5 +72,5 @@ export function VerifyPage() {
     h1(t('Verify this software')),
     p(t('The biggest risk in any web app is a server that quietly sends you different code. You can protect yourself by comparing the fingerprint of the code you are running with the one published for the release, and by comparing with your fellow trustees before you open cards.')),
     div({ class: 'card' }, out, field(t('Published fingerprint'), known), btn(t('Compare'), compare, { kind: 'primary' })),
-    callout('warn', t('Honest limits: this check cannot catch a server that shows different code to different visitors. That is why trustees should also compare the fingerprint with each other, and why you can run your own copy of the server.'))));
+    callout('warn', t('Honest limits: this page downloads the code again to work out its fingerprint. A server determined to cheat could show this page one file and run another, or show different code to different people. So this is a check against mistakes and casual tampering, not against a hostile server. The strongest check is to compare with a fingerprint you built yourself from the source, or one that someone you trust worked out on another device and network. That is also why you can run your own copy of the server.'))));
 }

@@ -1,10 +1,12 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as C from '../shared/crypto.js';
+import { publishByDefault } from '../shared/constants.js';
 import * as D from '../shared/deadlines.js';
-import { verifyChain, ledgerFields, auditFields, checkPinned } from '../shared/verify.js';
+import { verifyChain, ledgerFields, auditFields, checkPinned, checkCommitments } from '../shared/verify.js';
 import { can, ROLES } from '../shared/permissions.js';
 import { startApp, makeWorkspace, login } from './helpers.js';
+import { physicalOrder } from './sqlite-pages.js';
 
 const person = (name, i, extra = {}) => ({ name, email: `${name.split(' ')[0].toLowerCase()}+leak@example.com`, phone: `+155501990${i}0`, address: `${i} Leakcheck Lane`, jobTitle: 'Leakcheck Barista', status: 'member', shift: i < 6 ? 'Day' : 'Night', ...extra });
 const PEOPLE = [
@@ -31,8 +33,10 @@ async function cast(ws, idx, vote, option) {
   const b = C.castBallot(vote.votePublicKey, option);
   return { r: await ws.as(idx, 'POST', `/api/ws/votes/${vote.id}/ballot`, { ciphertext: b.ciphertext, receiptHash: b.receiptHash }), receipt: b.receiptCode };
 }
+// A vote ends at its closing time (or when everyone has voted). Tests move the closing time into the past instead of waiting for it.
+const endVote = (ws, voteId) => ws.h.app.db.prepare('UPDATE ws_votes SET closes_at=? WHERE id=?').run(new Date(Date.now() - 1000).toISOString(), voteId);
 async function tally(ws, closer, vote, committeeIdx, { publish = true } = {}) {
-  await ws.as(closer, 'POST', `/api/ws/votes/${vote.id}/close`);
+  endVote(ws, vote.id);
   const shares = []; let bundle;
   for (const i of committeeIdx) {
     bundle = (await ws.as(i, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json;
@@ -140,7 +144,7 @@ describe('workspace: founding, accounts, audit', () => {
   it('plaintext-leak test: names, emails, phones, addresses and job titles are ciphertext on disk, and no token is logged', () => {
     assert.deepEqual(h.leaks([...NEEDLES, ...ws.members.map((m) => m.token)]), []);
     const row = h.app.db.prepare('SELECT legal_name_enc, email_enc FROM ws_members LIMIT 1').get();
-    assert.match(row.legal_name_enc, /^v1\./);
+    assert.match(row.legal_name_enc, /^v2\./);
   });
 });
 
@@ -204,7 +208,7 @@ describe('workspace: secret ballots and self-executing votes', () => {
     assert.deepEqual(cols('ws_vote_participation'), ['vote_id', 'member_id', 'has_voted']);
     for (const t of ['ws_ballots', 'ws_vote_receipts']) assert.deepEqual(h.app.db.prepare(`SELECT "table" t FROM pragma_foreign_key_list('${t}')`).all().map((r) => r.t), ['ws_votes']);
     const sql = h.app.db.prepare("SELECT sql FROM sqlite_master WHERE name='ws_ballots'").get().sql;
-    assert.match(sql, /WITHOUT ROWID/); // stored in random-id order, so row order does not reveal cast order
+    assert.match(sql, /WITHOUT ROWID/); // sorted by a random id, so the logical order says nothing. (The physical order on disk still would, which is why every cast rewrites the vote's rows in random order; see "the order people voted in is not left on disk".)
     const ballotLogs = h.logs.filter((l) => l.includes('/ballot'));
     assert.ok(ballotLogs.length >= 8);
     for (const l of ballotLogs) for (const m of ws.members) assert.ok(!l.includes(m.id) && !l.includes(m.token));
@@ -231,7 +235,7 @@ describe('workspace: secret ballots and self-executing votes', () => {
     const vote = await openVote(ws, 0, { title: 'Second dues', type: 'dues_change', options: ['Yes', 'No'], effect: { kind: 'dues', name: 'Higher dues', amountCents: 9900 } });
     for (const i of [0, 1, 2]) await cast(ws, i, vote, 1);
     for (const i of [3, 4]) await cast(ws, i, vote, 0);
-    await ws.as(1, 'POST', `/api/ws/votes/${vote.id}/close`);
+    endVote(ws, vote.id);
     const bundle = (await ws.as(1, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json;
     const share = (i) => C.boxOpen(bundle.committee.find((c) => c.memberId === ws.members[i].id).sealed, ws.members[i].keys.boxPublicKey, ws.members[i].keys.boxSecretKey);
     await assert.rejects(C.reconstructVoteKey([share(1)])); // 1 of 3 cannot rebuild the key
@@ -258,7 +262,9 @@ describe('workspace: secret ballots and self-executing votes', () => {
     const { res } = await runVote(ws, { title: 'Recall Sam', type: 'recall', effect: { kind: 'role_revoke', memberId: ws.members[7].id, role: 'steward' } }, [0, 1, 2, 3], [4, 5]);
     assert.equal(res.json.effectApplied, 'role_revoke');
     assert.ok(!(await ws.as(7, 'GET', '/api/ws/me')).json.roles.includes('steward'));
-    await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[7].id, role: 'steward', op: 'add' });
+    // a role the members took away by a vote does not come back through the officers' role screen
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[7].id, role: 'steward', op: 'add' })).json.error, 'removed_by_vote');
+    h.app.db.prepare("UPDATE ws_roles SET removed_at=NULL, removed_by_vote_id=NULL WHERE member_id=? AND role='steward'").run(ws.members[7].id); // restore Sam for the tests that follow
   });
 
   it('members can force a vote: a petition qualifies at the threshold and opens exactly as written', async () => {
@@ -272,9 +278,400 @@ describe('workspace: secret ballots and self-executing votes', () => {
     const q = await ws.as(5, 'POST', `/api/ws/petitions/${mk.json.petitionId}/sign`);
     assert.deepEqual([q.json.status, q.json.signers], ['qualified', 2]);
     assert.ok(q.json.openBy);
+    assert.equal(q.json.overdue, false);
+    // every member sees when the committee has let the 14 days pass
+    h.app.db.prepare('UPDATE ws_petitions SET qualified_at=? WHERE id=?').run(new Date(Date.now() - 20 * 86400_000).toISOString(), mk.json.petitionId);
+    assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions.find((x) => x.id === mk.json.petitionId).overdue, true);
     const vote = await openVote(ws, 1, { petitionId: mk.json.petitionId, title: 'A different title the committee would prefer', type: 'general', options: ['Maybe', 'Never'] });
     assert.deepEqual([vote.title, vote.options], ['Vote on Saturday shifts', ['Yes', 'No']]); // the committee cannot reword it
     assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions[0].status, 'opened');
+    assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions[0].overdue, false); // opened: no longer overdue
+  });
+
+  it('the 14 days to open a petition count in the union\'s time zone, not UTC', async () => {
+    const mk = await ws.as(4, 'POST', '/api/ws/petitions', { title: 'Vote on parking', type: 'general', options: ['Yes', 'No'], passRule: 'majority' });
+    for (const i of [4, 5]) await ws.as(i, 'POST', `/api/ws/petitions/${mk.json.petitionId}/sign`);
+    const tz = 'Pacific/Kiritimati', old = h.app.db.prepare('SELECT timezone FROM ws_workspaces WHERE id=?').get(ws.wsId).timezone; // UTC+14
+    h.app.db.prepare('UPDATE ws_workspaces SET timezone=? WHERE id=?').run(tz, ws.wsId);
+    try {
+      const today = D.todayIn(tz);
+      // qualified at 01:00 local time 14 days ago, which is still the day before in UTC
+      h.app.db.prepare('UPDATE ws_petitions SET qualified_at=? WHERE id=?').run(`${D.addCalendar(today, -15)}T11:00:00.000Z`, mk.json.petitionId);
+      const p = (await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions.find((x) => x.id === mk.json.petitionId);
+      assert.equal(p.openBy, today); // the last day is today, locally
+      assert.equal(p.overdue, false);
+    } finally { h.app.db.prepare('UPDATE ws_workspaces SET timezone=? WHERE id=?').run(old, ws.wsId); }
+  });
+});
+
+describe('workspace: one person cannot make up a result, or take power alone', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+  const post = (idx, vote, body) => ws.as(idx, 'POST', `/api/ws/votes/${vote.id}/results`, body);
+  const attest = (vote, counts, idxs) => idxs.map((i) => ({ memberId: ws.members[i].id, signature: C.signTally(ws.members[i].keys.signSecretKey, vote.id, counts) }));
+
+  it('a result nobody can recount needs k committee signatures over the same counts; one member cannot make one up', async () => {
+    const vote = await openVote(ws, 0, { title: 'Authorize a strike?', type: 'strike_authorization', options: ['Yes', 'No'], passRule: 'majority' });
+    for (const i of [0, 1, 2, 4]) await cast(ws, i, vote, 0);
+    await cast(ws, 5, vote, 1);
+    endVote(ws, vote.id);
+    const bundle = (await ws.as(1, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json;
+    assert.equal(bundle.type, 'strike_authorization'); assert.equal(publishByDefault(bundle), false); // the counting page starts with the key kept back
+    const short = (r) => { assert.equal(r.status, 403); assert.equal(r.json.error, 'not_enough_committee'); };
+    short(await post(1, vote, { counts: [5, 0] })); // one committee member posting whatever they like
+    short(await post(1, vote, { counts: [5, 0], attestations: attest(vote, [5, 0], [1]) })); // ...even signing it themselves
+    short(await post(1, vote, { counts: [4, 1], attestations: [...attest(vote, [4, 1], [1]), ...attest(vote, [5, 0], [3])] })); // a second signature over different counts is worth nothing
+    short(await post(1, vote, { counts: [4, 1], attestations: [...attest(vote, [4, 1], [1]), ...attest(vote, [4, 1], [5])] })); // Marco is not on the committee
+    short(await post(1, vote, { counts: [4, 1], attestations: [...attest(vote, [4, 1], [1]), ...attest(vote, [4, 1], [1])] })); // signing twice is still one member
+    const other = await openVote(ws, 0, { title: 'Another question', type: 'general', options: ['Yes', 'No'] });
+    short(await post(1, vote, { counts: [4, 1], attestations: [...attest(vote, [4, 1], [1]), { memberId: ws.members[3].id, signature: attest(other, [4, 1], [3])[0].signature }] })); // a signature for another vote
+    assert.equal(h.app.db.prepare('SELECT status FROM ws_votes WHERE id=?').get(vote.id).status, 'closed'); // none of that recorded anything
+    const ok = await post(1, vote, { counts: [4, 1], attestations: attest(vote, [4, 1], [1, 3]) }); // two different committee members who each signed these counts
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.deepEqual([ok.json.results.counts, ok.json.results.passed, ok.json.results.verifiable, ok.json.results.attestedBy], [[4, 1], true, false, 2]);
+  });
+
+  it('a decision that changes dues, rules or roles is always counted in the open: the ballot key is required', async () => {
+    const vote = await openVote(ws, 0, { title: 'Raise dues', type: 'dues_change', options: ['Yes', 'No'], effect: { kind: 'dues', name: 'Made-up dues', amountCents: 50_000 } });
+    for (const i of [0, 1]) await cast(ws, i, vote, 1); // both vote No
+    endVote(ws, vote.id);
+    const forged = await post(1, vote, { counts: [2, 0], attestations: attest(vote, [2, 0], [1, 2, 3]) }); // even every committee member's signature is not enough
+    assert.equal(forged.status, 409);
+    assert.equal(forged.json.error, 'key_required');
+    assert.equal((await ws.as(4, 'GET', '/api/ws/finance/summary')).json.dues.length, 0);
+  });
+
+  it('refuses to count when the ballots and receipts do not match who voted', async () => {
+    const vote = await openVote(ws, 0, { title: 'Stuffed box', type: 'general', options: ['Yes', 'No'] });
+    await cast(ws, 4, vote, 1);
+    const extra = C.castBallot(vote.votePublicKey, 0); // someone with database access adds a ballot nobody cast
+    h.app.db.prepare('INSERT INTO ws_ballots (id,vote_id,choice_ciphertext) VALUES (?,?,?)').run(crypto.randomUUID(), vote.id, extra.ciphertext);
+    const res = await tally(ws, 1, vote, [1, 3]);
+    assert.equal(res.status, 409);
+    assert.deepEqual([res.json.error, res.json.ballots, res.json.voted], ['ballot_count_mismatch', 2, 1]);
+  });
+
+  it('"No" can never win as "passed": a decision with an effect has fixed options and a real rule', async () => {
+    // a recall asked with "plurality": any unique winner counted as passed, so "Keep in office" removed the role
+    const recall = await openVote(ws, 0, { title: 'Recall Sam', type: 'recall', passRule: 'plurality', effect: { kind: 'role_revoke', memberId: ws.members[7].id, role: 'steward' } });
+    assert.equal(recall.passRule, 'majority');
+    for (const i of [0, 1, 2, 3]) await cast(ws, i, recall, 1); // keep
+    for (const i of [4, 5]) await cast(ws, i, recall, 0); // remove
+    const res = await tally(ws, 1, recall, [1, 3]);
+    assert.deepEqual([res.json.results.passed, res.json.effectApplied], [false, null]);
+    assert.ok((await ws.as(7, 'GET', '/api/ws/me')).json.roles.includes('steward'));
+    // dues cannot be worded so that "Yes" means "keep things as they are"
+    const dues = await openVote(ws, 0, { title: 'Dues', type: 'dues_change', options: ['Keep dues as they are', 'Raise to $500'], passRule: 'plurality', effect: { kind: 'dues', name: 'Five hundred', amountCents: 50_000 } });
+    assert.deepEqual([dues.options, dues.passRule], [['Yes', 'No'], 'majority']);
+  });
+
+  it('nobody can run their own recall, and a recalled role is not handed back', async () => {
+    const ring = (await ws.as(0, 'GET', '/api/ws/keyring?role=election_committee')).json.holders;
+    const spec = (holders) => C.newVoteKeys(holders, 2).then((vk) => ({ title: 'Recall Enzo', type: 'recall', effect: { kind: 'role_revoke', memberId: ws.members[1].id, role: 'officer' },
+      closesAt: new Date(Date.now() + 3600_000).toISOString(), votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: 2 }));
+    assert.equal((await ws.as(0, 'POST', '/api/ws/votes', await spec(ring))).json.error, 'committee_conflict'); // the target is on the committee that would count it
+    const clean = await spec(ring.filter((x) => x.memberId !== ws.members[1].id));
+    assert.equal((await ws.as(1, 'POST', '/api/ws/votes', clean)).json.error, 'committee_conflict'); // ...or opens it himself
+    assert.equal((await ws.as(0, 'POST', '/api/ws/votes', clean)).status, 200); // someone else can
+  });
+
+  it('adding people to the roster cannot create voting members or officers, and nobody grants themselves a role', async () => {
+    const r = await ws.as(0, 'POST', '/api/ws/members', { members: [{ legalName: 'Fake Officer', claimTokenHash: C.hashToken(C.newToken()), status: 'member', roles: ['officer', 'treasurer'] }] });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(h.app.db.prepare('SELECT membership_status s FROM ws_members WHERE id=?').get(r.json.memberIds[0]).s, 'unit_employee'); // status comes from the server, not the request
+    assert.equal(h.app.db.prepare('SELECT COUNT(*) c FROM ws_roles WHERE member_id=?').get(r.json.memberIds[0]).c, 0);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: r.json.memberIds[0], role: 'officer', op: 'add' })).json.error, 'not_a_member'); // and someone who has not joined cannot hold a role
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[0].id, role: 'election_committee', op: 'add' })).json.error, 'no_self_assign');
+  });
+
+  it('a founding roster that lists a role twice is accepted, not a server error', async () => {
+    const t = await makeWorkspace(h, [person('Dup Officer', 0, { roles: ['officer', 'officer', 'treasurer'] }), person('Worker Two', 1)]);
+    assert.equal(t.members.length, 2);
+  });
+
+  it('the export does not reveal ballots while a vote is open, and it shows in every member\'s access log', async () => {
+    const vote = await openVote(ws, 0, { title: 'Still open', type: 'general', options: ['Yes', 'No'] });
+    await cast(ws, 4, vote, 0);
+    const seen = async () => (await ws.as(4, 'GET', '/api/ws/me/access-log')).json.entries.filter((e) => e.action === 'member.pii.read').length;
+    const before = await seen();
+    const open = (await ws.as(0, 'GET', '/api/ws/export')).json.votes.find((v) => v.id === vote.id);
+    assert.deepEqual([open.ballots, open.receiptHashes], [[], []]); // reading them as they arrive would isolate each ballot with its receipt
+    assert.equal(await seen(), before + 1); // Mona can see that an officer exported her details
+    await tally(ws, 1, vote, [1, 3]);
+    const done = (await ws.as(0, 'GET', '/api/ws/export')).json.votes.find((v) => v.id === vote.id);
+    assert.equal(done.ballots.length, 1); // after the count they are part of the record
+  });
+});
+
+describe('workspace: an encrypted field belongs to its row', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, [person('Ofelia Qqqofficer', 0, { roles: ['officer'] }), person('Mona Qqqmember', 4), person('Marco Qqqmember', 5)]); });
+  after(() => h.stop());
+  const row = (i) => h.app.db.prepare('SELECT email_enc e, legal_name_enc n FROM ws_members WHERE id=?').get(ws.members[i].id);
+
+  it('swapping two members\' encrypted email or name in the database does not show one person\'s data as another\'s', async () => {
+    const [mona, marco] = [row(1), row(2)];
+    assert.match(mona.e, /^v2\./); // new values are bound to their row
+    const put = h.app.db.prepare('UPDATE ws_members SET email_enc=?, legal_name_enc=? WHERE id=?');
+    put.run(marco.e, marco.n, ws.members[1].id); put.run(mona.e, mona.n, ws.members[2].id); // someone with the database swaps them
+    const list = (await ws.as(0, 'GET', '/api/ws/roster')).json.members;
+    assert.ok(!list.some((m) => m.email === 'marco+leak@example.com' && m.id === ws.members[1].id), 'Marco\'s email shown as Mona\'s');
+    assert.ok(!list.some((m) => m.name === 'Mona Qqqmember' && m.id === ws.members[2].id), 'Mona\'s name shown as Marco\'s');
+    assert.equal(list.find((m) => m.id === ws.members[1].id).email, '[unreadable]'); // the damage shows instead
+    put.run(mona.e, mona.n, ws.members[1].id); put.run(marco.e, marco.n, ws.members[2].id);
+  });
+
+  it('values written before this change are re-encrypted to their row when the server starts, and the old form is refused after that', async () => {
+    const dk = h.app.kms.dataKey(ws.wsId, h.app.db.prepare('SELECT data_key_wrapped w FROM ws_workspaces WHERE id=?').get(ws.wsId).w);
+    const v1 = (text, aad) => { const box = C.aeadSeal(dk, C.utf8(text), aad); return 'v1.' + box.nonce + '.' + box.ciphertext; }; // bound to the column only
+    h.app.db.prepare('UPDATE ws_members SET email_enc=?, legal_name_enc=? WHERE id=?').run(v1('old+leak@example.com', 'member.email'), v1('Mona Qqqmember', 'member.legal_name'), ws.members[1].id);
+    const disb = (id, payee, memo) => h.app.db.prepare("INSERT INTO ws_disbursements (id,workspace_id,requested_by,amount_cents,category,payee_enc,memo_enc,required_approvals,created_at) VALUES (?,?,?,100,'office',?,?,2,'2026-01-01')")
+      .run(id, ws.wsId, ws.members[0].id, payee, memo);
+    disb('d-old', v1('Zyxwvut Old Payee', 'disb.payee'), v1('Zyxwvut old memo', 'disb.memo'));
+    h.app.db.prepare("DELETE FROM app_meta WHERE key='fields_bound_to_rows'").run(); // a database written by the earlier version
+    // a restart on the same database and master key
+    const again = await startApp({ dbPath: h.app.cfg.dbPath, masterKey: h.app.cfg.masterKey });
+    try {
+      const row = again.app.db.prepare('SELECT email_enc e, legal_name_enc n FROM ws_members WHERE id=?').get(ws.members[1].id);
+      assert.match(row.e, /^v2\./); assert.match(row.n, /^v2\./);
+      assert.equal(again.app.db.prepare("SELECT COUNT(*) c FROM ws_members WHERE email_enc LIKE 'v1.%' OR legal_name_enc LIKE 'v1.%' OR phone_enc LIKE 'v1.%' OR address_enc LIKE 'v1.%' OR job_title_enc LIKE 'v1.%'").get().c, 0);
+      const m = await login(again, { id: ws.members[0].id, keys: ws.members[0].keys });
+      const list = (await again.call('GET', '/api/ws/roster', { auth: m.auth })).json.members;
+      assert.equal(list.find((x) => x.id === ws.members[1].id).email, 'old+leak@example.com'); // same value, now bound to its row
+      // an old-form value pasted in afterwards is not accepted
+      again.app.db.prepare('UPDATE ws_members SET email_enc=? WHERE id=?').run(v1('someone.else@example.com', 'member.email'), ws.members[1].id);
+      assert.equal((await again.call('GET', '/api/ws/roster', { auth: m.auth })).json.members.find((x) => x.id === ws.members[1].id).email, '[unreadable]');
+      // the payments waiting for approval were moved too
+      const d = again.app.db.prepare("SELECT payee_enc p, memo_enc m FROM ws_disbursements WHERE id='d-old'").get();
+      assert.match(d.p, /^v2\./); assert.match(d.m, /^v2\./);
+      const pend = (await again.call('GET', '/api/ws/finance/summary', { auth: m.auth })).json.pending.find((x) => x.id === 'd-old');
+      assert.equal(pend.payee, 'Zyxwvut Old Payee'); assert.equal(pend.memo, 'Zyxwvut old memo');
+      // an old-form payee pasted in after the move is not accepted either
+      again.app.db.prepare("UPDATE ws_disbursements SET payee_enc=? WHERE id='d-old'").run(v1('Zyxwvut Swapped Payee', 'disb.payee'));
+      assert.equal((await again.call('GET', '/api/ws/finance/summary', { auth: m.auth })).json.pending.find((x) => x.id === 'd-old').payee, '[unreadable]');
+    } finally { await again.stop(); }
+    // the move happens once: old-form values pasted in after it are never re-encrypted (and so made readable) by a later restart
+    const third = await startApp({ dbPath: h.app.cfg.dbPath, masterKey: h.app.cfg.masterKey });
+    try {
+      assert.match(third.app.db.prepare('SELECT email_enc e FROM ws_members WHERE id=?').get(ws.members[1].id).e, /^v1\./);
+      assert.match(third.app.db.prepare("SELECT payee_enc p FROM ws_disbursements WHERE id='d-old'").get().p, /^v1\./);
+      const m = await login(third, { id: ws.members[0].id, keys: ws.members[0].keys });
+      assert.equal((await third.call('GET', '/api/ws/roster', { auth: m.auth })).json.members.find((x) => x.id === ws.members[1].id).email, '[unreadable]');
+      assert.equal((await third.call('GET', '/api/ws/finance/summary', { auth: m.auth })).json.pending.find((x) => x.id === 'd-old').payee, '[unreadable]');
+    } finally { await third.stop(); }
+  });
+
+  it('a row-bound value moved to another column of the same row is not shown there', async () => {
+    const r = h.app.db.prepare('SELECT email_enc e, phone_enc p FROM ws_members WHERE id=?').get(ws.members[2].id);
+    assert.match(r.e, /^v2\./);
+    h.app.db.prepare('UPDATE ws_members SET phone_enc=? WHERE id=?').run(r.e, ws.members[2].id); // the email, pasted as the phone
+    try {
+      const list = (await ws.as(0, 'GET', '/api/ws/roster')).json.members;
+      const marco = list.find((x) => x.id === ws.members[2].id);
+      assert.equal(marco.phone, '[unreadable]'); assert.equal(marco.email, 'marco+leak@example.com');
+    } finally { h.app.db.prepare('UPDATE ws_members SET phone_enc=? WHERE id=?').run(r.p, ws.members[2].id); }
+  });
+});
+
+describe('workspace: members can check who was paid, not only how much (#41)', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, [person('Tess Qqqtreasurer', 0, { roles: ['treasurer', 'officer'] }), person('Mona Qqqmember', 4)]); });
+  after(() => h.stop());
+
+  it('each visible payee and memo matches the commitment inside the hash chain, and a changed payee is caught', async () => {
+    assert.equal((await ws.as(0, 'POST', '/api/ws/ledger/receipt', { category: 'dues', amountCents: 1500, payer: 'Zyxwvut Payee', memo: 'Zyxwvut memo' })).status, 200);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/ledger/receipt', { category: 'donations', amountCents: 900, payer: 'A Friend' })).status, 200);
+    const read = async () => [(await ws.as(1, 'GET', '/api/ws/finance/summary')).json.entries, (await ws.as(1, 'GET', '/api/ws/finance/chain')).json.entries];
+    const [entries, chain] = await read();
+    assert.ok(entries.every((e) => typeof e.salt === 'string')); // a member gets what they need to check it
+    assert.deepEqual(checkCommitments(entries, chain), { ok: true, checked: 2, brokenAt: null });
+    // someone with the database and the master key re-encrypts a different payee into entry 1: amounts and hashes are untouched
+    const row = h.app.db.prepare('SELECT id, workspace_id w FROM ws_ledger WHERE seq=1 AND workspace_id=?').get(ws.wsId);
+    const dk = h.app.kms.dataKey(row.w, h.app.db.prepare('SELECT data_key_wrapped k FROM ws_workspaces WHERE id=?').get(row.w).k);
+    h.app.db.exec('DROP TRIGGER IF EXISTS ws_ledger_no_update'); // what a person editing the file directly can do
+    h.app.db.prepare('UPDATE ws_ledger SET payee_enc=? WHERE id=?').run(h.app.kms.enc(dk, 'Somebody Else', 'ledger.payee', row.id), row.id);
+    const [e2, c2] = await read();
+    assert.equal(e2.find((e) => e.seq === 1).payee, 'Somebody Else');
+    assert.deepEqual(checkCommitments(e2, c2), { ok: false, checked: 2, brokenAt: 1 });
+    assert.equal(verifyChain(c2, ledgerFields).ok, true); // the chain alone would not have noticed
+    // ...nor may it be hidden by also dropping the salt, or by damaging the memo so that nothing can be checked
+    h.app.db.prepare('UPDATE ws_ledger SET memo_enc=? WHERE id=?').run(h.app.kms.enc(dk, JSON.stringify({ memo: 'Zyxwvut memo' }), 'ledger.memo', row.id), row.id);
+    const [e3, c3] = await read();
+    assert.equal(e3.find((e) => e.seq === 1).salt, undefined);
+    assert.deepEqual(checkCommitments(e3, c3), { ok: false, checked: 2, brokenAt: 1 });
+    h.app.db.prepare('UPDATE ws_ledger SET memo_enc=? WHERE id=?').run('v2.AAAA.BBBB', row.id);
+    const [e4, c4] = await read();
+    assert.deepEqual(checkCommitments(e4, c4), { ok: false, checked: 2, brokenAt: 1 });
+  });
+});
+
+describe('workspace: the whole audit log is checked, not only the newest page (#41)', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('an officer gets every entry\'s hash to check from the very first, and can page back through the entries', async () => {
+    for (let i = 0; i < 80; i++) await ws.as(0, 'GET', '/api/ws/roster'); // each view writes one entry per person: 560 entries
+    const a = (await ws.as(0, 'GET', '/api/ws/audit')).json;
+    const total = h.app.db.prepare('SELECT COUNT(*) c FROM ws_audit WHERE workspace_id=?').get(ws.wsId).c;
+    assert.ok(total > 500);
+    assert.equal(a.entries.length, 500); // the page shown
+    assert.equal(a.chain.length, total); // what is checked: everything
+    assert.equal(verifyChain(a.chain, auditFields, { anchored: true }).ok, true);
+    const older = (await ws.as(0, 'GET', `/api/ws/audit?before=${a.entries.at(-1).seq}`)).json.entries;
+    assert.equal(older.length, total - 500);
+    assert.equal(older[0].seq, a.entries.at(-1).seq - 1);
+    // a rewritten early entry, out of sight of the first page, is caught
+    h.app.db.exec('DROP TRIGGER IF EXISTS ws_audit_no_update');
+    h.app.db.prepare("UPDATE ws_audit SET action='member.pii.read.x' WHERE workspace_id=? AND seq=2").run(ws.wsId);
+    assert.equal(verifyChain((await ws.as(0, 'GET', '/api/ws/audit')).json.chain, auditFields, { anchored: true }).ok, false);
+  });
+});
+
+describe('workspace: a recall cannot be blocked or dodged by the person it targets', () => {
+  let h;
+  before(async () => { h = await startApp(); });
+  after(() => h.stop());
+  const team = (names) => makeWorkspace(h, names.map(([n, roles], i) => person(n, i, roles ? { roles } : {})));
+  const recallSpec = (ws, target, role = 'officer') => ({ title: 'Recall', type: 'recall', effect: { kind: 'role_revoke', memberId: ws.members[target].id, role } });
+
+  it('taking the committee\'s role away after the vote closes does not stop the count', async () => {
+    const ws = await team([['Solo Qqqofficer', ['officer']], ['Eve Qqqelect', ['election_committee']], ['Eli Qqqelect', ['election_committee']], ['Moe Qqqmember']]);
+    const vote = await openVote(ws, 1, recallSpec(ws, 0));
+    for (const i of [1, 2, 3]) await cast(ws, i, vote, 0); // remove
+    endVote(ws, vote.id);
+    for (const i of [1, 2]) await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[i].id, role: 'election_committee', op: 'remove' });
+    const res = await tally(ws, 1, vote, [1, 2]); // the people who hold the shares still count it
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.deepEqual([res.json.results.passed, res.json.effectApplied], [true, 'role_revoke']);
+    assert.ok(!(await ws.as(0, 'GET', '/api/ws/me')).json.roles.includes('officer'));
+    assert.equal((await ws.as(3, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).status, 403); // being on the vote's committee is what counts, not the role
+  });
+
+  it('stepping down just before the count does not let the role be handed back afterwards', async () => {
+    const ws = await team([['Tara Qqqofficer', ['officer']], ['Alan Qqqofficer', ['officer']], ['Eve Qqqelect', ['election_committee']], ['Eli Qqqelect', ['election_committee']], ['Moe Qqqmember'], ['Max Qqqmember']]);
+    const vote = await openVote(ws, 2, recallSpec(ws, 0));
+    for (const i of [2, 3, 4, 5]) await cast(ws, i, vote, 0);
+    endVote(ws, vote.id);
+    assert.equal((await ws.as(0, 'POST', '/api/ws/roles', { memberId: ws.members[0].id, role: 'officer', op: 'remove' })).status, 200);
+    const res = await tally(ws, 2, vote, [2, 3]);
+    assert.deepEqual([res.json.results.passed, res.json.effectApplied], [true, 'role_revoke']);
+    const back = await ws.as(1, 'POST', '/api/ws/roles', { memberId: ws.members[0].id, role: 'officer', op: 'add' });
+    assert.equal(back.json.error, 'removed_by_vote');
+  });
+
+  it('a ratification or strike vote cannot be worded or ruled so that "No" passes', async () => {
+    const ws = await team([['Olga Qqqofficer', ['officer']], ['Eve Qqqelect', ['election_committee']], ['Eli Qqqelect', ['election_committee']], ['Moe Qqqmember']]);
+    for (const type of ['ratification', 'strike_authorization']) {
+      const v = await openVote(ws, 0, { title: 'Question', type, options: ['Reject the contract', 'Accept it', 'Undecided'], passRule: 'plurality' });
+      assert.deepEqual([v.options, v.passRule], [['Yes', 'No'], 'majority'], type);
+      assert.equal((await openVote(ws, 0, { title: 'Question', type, passRule: 'two_thirds' })).passRule, 'two_thirds');
+    }
+  });
+});
+
+describe('workspace: the order people voted in is not left on disk', () => {
+  let h, ws;
+  const kendall = (a, b) => { // rank correlation of the same items in two orders: 1 identical, -1 reversed, about 0 unrelated
+    const pos = new Map(b.map((x, i) => [x, i])); let c = 0, d = 0;
+    for (let i = 0; i < a.length; i++) for (let j = i + 1; j < a.length; j++) (pos.get(a[i]) < pos.get(a[j]) ? c++ : d++);
+    return (c - d) / (c + d);
+  };
+  const BIG = Array.from({ length: 20 }, (_, i) => person(`Voter${i} Qqqperson`, i, i === 0 ? { roles: ['officer', 'election_committee'] } : i < 3 ? { roles: ['election_committee'] } : {}));
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, BIG); });
+  after(() => h.stop());
+
+  it('a copy of the database does not show which ballot or receipt came first', async () => {
+    const vote = await openVote(ws, 0, { title: 'Order test', type: 'general', options: ['Yes', 'No'] });
+    const order = BIG.map((_, i) => i).sort(() => C.randomBytes(1)[0] - 128); // people vote in an arbitrary order
+    const cts = [], rhs = [], who = [];
+    for (const i of order) {
+      const b = C.castBallot(vote.votePublicKey, i % 2);
+      assert.equal((await ws.as(i, 'POST', `/api/ws/votes/${vote.id}/ballot`, { ciphertext: b.ciphertext, receiptHash: b.receiptHash })).status, 200);
+      cts.push(b.ciphertext); rhs.push(b.receiptHash); who.push(ws.members[i].id);
+    }
+    // what someone holding a copy of the file can read: the rows in the order they sit on disk (inside a page the newest cell sits lowest)
+    const ballots = physicalOrder(h, 'ws_ballots', (v) => v[1] === vote.id).flat().map((v) => v[2]);
+    const receipts = physicalOrder(h, 'ws_vote_receipts', (v) => v[0] === vote.id).flat().map((v) => v[1]);
+    const voted = physicalOrder(h, 'ws_vote_participation', (v) => v[0] === vote.id && v[2] === 1).flat().map((v) => v[1]);
+    assert.deepEqual([ballots.length, receipts.length, voted.length], [20, 20, 20]);
+    const mirror = (a) => [...a].reverse();
+    for (const [name, onDisk, cast] of [['ballots', ballots, cts], ['receipts', receipts, rhs], ['who has voted', voted, who]]) {
+      assert.notDeepEqual(onDisk, cast, `${name} sit in cast order`);
+      assert.notDeepEqual(onDisk, mirror(cast), `${name} sit in reverse cast order`);
+      // ...and not nearly in order either: Kendall's tau between the two orders. Random layouts of 20 give |tau| around 0.16 (a bound of 0.7 is over
+      // four standard deviations, so this does not fail by chance); a layout close to cast order, with a row or two moved, scores about 0.9.
+      // (Today the rewrite reads rows back by their random primary key, so re-inserting them already scatters them; the shuffle is a second layer.)
+      assert.ok(Math.abs(kendall(onDisk, cast)) < 0.7, `${name} are laid out close to cast order (tau ${kendall(onDisk, cast).toFixed(2)})`);
+    }
+    // scrambling only moves rows: everything is still there, and the count still works
+    assert.deepEqual([...ballots].sort(), [...cts].sort());
+    assert.deepEqual([...receipts].sort(), [...rhs].sort());
+  });
+});
+
+describe('workspace: a vote cannot be opened so briefly that nobody sees it, or ended early', () => {
+  let h, ws;
+  before(async () => { h = await startApp({ minVoteHours: 24 }); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('refuses a voting window shorter than the minimum, and refuses to end a vote before everyone has voted', async () => {
+    const ring = (await ws.as(0, 'GET', '/api/ws/keyring?role=election_committee')).json.holders;
+    const vk = await C.newVoteKeys(ring, 2);
+    const base = { title: 'Short window', type: 'general', options: ['Yes', 'No'], votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: 2 };
+    for (const ms of [2_000, 3600_000, 23 * 3600_000]) assert.equal((await ws.as(0, 'POST', '/api/ws/votes', { ...base, closesAt: new Date(Date.now() + ms).toISOString() })).status, 400, String(ms));
+    const ok = await ws.as(0, 'POST', '/api/ws/votes', { ...base, closesAt: new Date(Date.now() + 24 * 3600_000).toISOString() });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    const vote = (await ws.as(0, 'GET', `/api/ws/votes/${ok.json.voteId}`)).json;
+    assert.equal((await ws.as(0, 'POST', `/api/ws/votes/${vote.id}/close`)).json.error, 'vote_still_open'); // nobody can end it while members are still to vote
+    for (const i of V.slice(0, 6)) await cast(ws, i, vote, 0);
+    assert.equal((await ws.as(0, 'POST', `/api/ws/votes/${vote.id}/close`)).json.error, 'vote_still_open'); // 6 of 7
+    await cast(ws, V[6], vote, 0);
+    assert.equal((await ws.as(0, 'POST', `/api/ws/votes/${vote.id}/close`)).json.status, 'closed'); // everyone has voted
+  });
+});
+
+describe('workspace: smaller fixes from the review', () => {
+  let h, ws;
+  const TEAM = [person('Ofelia Qqqofficer', 0, { roles: ['officer', 'treasurer', 'chief_steward'] }), person('Mona Qqqmember', 1, { location: 'Warehouse B', preferredLanguage: 'Español' }), person('Una Qqqunit', 2, { status: 'unit_employee' })];
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, TEAM); });
+  after(() => h.stop());
+
+  it('a category must be one we defined, not a property every object has', async () => {
+    for (const category of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      assert.equal((await ws.as(0, 'POST', '/api/ws/ledger/receipt', { amountCents: 100, category })).status, 400, category);
+      assert.equal((await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 100, category, payee: 'Somebody' })).status, 400, category);
+    }
+    assert.equal((await ws.as(0, 'POST', '/api/ws/ledger/receipt', { amountCents: 100, category: 'dues' })).status, 200);
+  });
+
+  it('saving your profile keeps the fields the form does not send', async () => {
+    const row = () => h.app.db.prepare('SELECT shift, location, preferred_language pl FROM ws_members WHERE id=?').get(ws.members[1].id);
+    const before = row();
+    assert.deepEqual(before, { shift: 'Day', location: 'Warehouse B', pl: 'Español' });
+    assert.equal((await ws.as(1, 'POST', '/api/ws/me/profile', { phone: '+15550100', address: '1 Main St', jobTitle: 'Barista', shift: 'Day' })).status, 200); // what the form sends
+    assert.deepEqual(row(), before); // location and language survived
+    assert.equal((await ws.as(1, 'POST', '/api/ws/me/profile', { phone: '', address: '', jobTitle: '', shift: 'Night', location: null })).status, 200);
+    assert.deepEqual(row(), { shift: 'Night', location: null, pl: 'Español' }); // what is sent changes; null clears; the rest stays
+  });
+
+  it('a contract article is a short reference; a narrative is refused instead of being stored in the clear', async () => {
+    const file = (articleRef) => {
+      const id = crypto.randomUUID(), k = C.randomBytes(32);
+      return { id, ...C.sealJson(k, { what: 'Zyxwvut concern' }, 'grievance|' + id), ...(articleRef === undefined ? {} : { articleRef }),
+        sealedKeys: { [ws.members[2].id]: C.boxSeal(ws.members[2].keys.boxPublicKey, k), [ws.members[0].id]: C.boxSeal(ws.members[0].keys.boxPublicKey, k) } };
+    };
+    for (const bad of ['supervisor J. Doe told me to sign off on it', 'Art. 12; call him', '<script>', 'x'.repeat(21), 'Art. 5\n(b)', 'Art. 5 [b]', 'a@b.c']) assert.equal((await ws.as(2, 'POST', '/api/ws/grievances', file(bad))).json.error, 'bad_article', bad);
+    for (const good of ['Art. 12', 'Article 3.2', '§ 4', 'Art. 5(b)', '12/3', 'Art. 7, 9', 'Art. IV', undefined, '']) assert.equal((await ws.as(2, 'POST', '/api/ws/grievances', file(good))).status, 200, String(good));
+    assert.equal(h.app.db.prepare("SELECT COUNT(*) c FROM ws_grievances WHERE article_ref LIKE '%supervisor%'").get().c, 0);
+  });
+
+  it('a fiscal year cannot start on a day that does not exist', async () => {
+    const start = async (v) => { const w = await makeWorkspace(h, [TEAM[0]], { fiscalYearStart: v }); return h.app.db.prepare('SELECT fiscal_year_start f FROM ws_workspaces WHERE id=?').get(w.wsId).f; };
+    assert.equal(await start('07-01'), '07-01');
+    assert.equal(await start('02-29'), '02-29'); // a leap day is a real day
+    for (const bad of ['02-31', '04-31', '13-01', '00-10', '06-00', '1-1', 'nonsense']) assert.equal(await start(bad), '01-01', bad);
   });
 });
 
@@ -294,6 +691,44 @@ describe('workspace: officer elections (when the feature flag is on)', () => {
     assert.equal(res.json.results.winner, 0);
     assert.equal(res.json.effectApplied, 'role_grant');
     assert.ok((await ws.as(4, 'GET', '/api/ws/me')).json.roles.includes('steward'));
+  });
+
+  it('the name on the ballot is the person who gets the role: labels come from the candidates, never from free text', async () => {
+    const ring = (await ws.as(0, 'GET', '/api/ws/keyring?role=election_committee')).json.holders.filter((x) => x.memberId !== ws.members[5].id);
+    const open = async (options, memberIds) => {
+      const vk = await C.newVoteKeys(ring, 2);
+      return ws.as(0, 'POST', '/api/ws/votes', { title: 'Elect a treasurer', type: 'officer_election', options, closesAt: new Date(Date.now() + 3600_000).toISOString(), votePublicKey: vk.votePublicKey, committee: vk.committee, thresholdK: 2, effect: { kind: 'role_grant', role: 'treasurer', memberIds } });
+    };
+    // labels that say one thing while the ids say another
+    const r = await open(['Mona', 'Marco'], [ws.members[5].id, ws.members[4].id]);
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    const v = (await ws.as(0, 'GET', `/api/ws/votes/${r.json.voteId}`)).json;
+    assert.deepEqual(v.options, ['Marco Qqqmember', 'Mona Qqqmember']); // each option is its candidate's own name, in the same order as the ids
+    assert.deepEqual(JSON.parse(h.app.db.prepare('SELECT options_json o FROM ws_votes WHERE id=?').get(r.json.voteId).o), ['Candidate 1', 'Candidate 2']); // names stay encrypted at rest
+    assert.equal((await open(['A', 'B'], [ws.members[4].id, ws.members[4].id])).status, 400); // the same person twice
+    assert.equal((await open(['A', 'B'], [ws.members[4].id, ws.members[6].id])).json.error, 'not_a_member'); // Una has not joined the union
+  });
+});
+
+describe('workspace: an account claimed after a vote opens does not vote in it (#43)', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('whoever holds an unclaimed claim link cannot use it to vote in a vote that is already open', async () => {
+    // a member account that has not been claimed yet (as founding members' accounts are until they open their link)
+    const tok = C.newToken();
+    const id = (await ws.as(0, 'POST', '/api/ws/members', { members: [{ legalName: 'Unclaimed Qqqmember', claimTokenHash: C.hashToken(tok) }] })).json.memberIds[0];
+    h.app.db.prepare("UPDATE ws_members SET membership_status='member' WHERE id=?").run(id);
+    const vote = await openVote(ws, 0, { title: 'Open question', type: 'general', options: ['Yes', 'No'] });
+    assert.equal(h.app.db.prepare('SELECT COUNT(*) c FROM ws_vote_participation WHERE vote_id=? AND member_id=?').get(vote.id, id).c, 0); // not eligible, and not counted
+    const keys = C.newKeypairs();
+    assert.equal((await h.call('POST', '/api/ws/claim', { body: { workspaceId: ws.wsId, claimToken: tok, boxPublicKey: keys.boxPublicKey, signPublicKey: keys.signPublicKey } })).status, 200);
+    const m = await login(h, { id, keys });
+    const b = C.castBallot(vote.votePublicKey, 0);
+    assert.equal((await h.call('POST', `/api/ws/votes/${vote.id}/ballot`, { auth: m.auth, body: { ciphertext: b.ciphertext, receiptHash: b.receiptHash } })).status, 403);
+    const next = await openVote(ws, 0, { title: 'Next question', type: 'general', options: ['Yes', 'No'] }); // claimed now: eligible for the next vote
+    assert.equal((await h.call('POST', `/api/ws/votes/${next.id}/ballot`, { auth: m.auth, body: { ...C.castBallot(next.votePublicKey, 0), receiptCode: undefined } })).status, 200);
   });
 });
 
@@ -319,6 +754,12 @@ describe('workspace: money you can audit', () => {
     assert.equal((await ws.as(1, 'POST', `/api/ws/disbursements/${big.id}/approve`, {})).status, 409); // the same officer twice is not two officers
     assert.equal((await ws.as(2, 'POST', `/api/ws/disbursements/${big.id}/approve`, {})).json.status, 'approved');
     assert.equal((await ws.as(0, 'POST', `/api/ws/disbursements/${big.id}/pay`)).status, 200);
+    // a payee that no longer decrypts is not paid into the immutable ledger as "[unreadable]"
+    const bad = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 200, category: 'office', payee: 'Zyxwvut Payee Garbled' })).json;
+    assert.equal((await ws.as(1, 'POST', `/api/ws/disbursements/${bad.id}/approve`, {})).json.status, 'approved');
+    h.app.db.prepare('UPDATE ws_disbursements SET payee_enc=? WHERE id=?').run('v2.AAAA.BBBB', bad.id);
+    const ledgerRows = () => h.app.db.prepare('SELECT COUNT(*) c FROM ws_ledger').get().c, rowsBefore = ledgerRows();
+    assert.deepEqual([(await ws.as(0, 'POST', `/api/ws/disbursements/${bad.id}/pay`)).json.error, ledgerRows()], ['unreadable', rowsBefore]);
     const rej = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 100, category: 'office', payee: 'X' })).json;
     assert.equal((await ws.as(2, 'POST', `/api/ws/disbursements/${rej.id}/approve`, { decision: 'reject' })).json.status, 'rejected');
     const aid = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 2500, category: 'member_benefits', payee: 'Zyxwvut Payee Hardship', memo: 'Rent help' })).json;
@@ -334,6 +775,9 @@ describe('workspace: money you can audit', () => {
     assert.throws(() => h.app.db.prepare('UPDATE ws_ledger SET amount_cents=1').run(), /immutable/);
     assert.throws(() => h.app.db.prepare('DELETE FROM ws_ledger').run(), /immutable/);
     assert.throws(() => h.app.db.prepare('UPDATE ws_audit SET action=?').run('x'), /append-only/);
+    // INSERT OR REPLACE deletes the row it replaces; without recursive triggers it did so without tripping the guards above
+    assert.throws(() => h.app.db.prepare('INSERT OR REPLACE INTO ws_ledger SELECT * FROM ws_ledger WHERE seq=1').run(), /immutable/);
+    assert.throws(() => h.app.db.prepare('INSERT OR REPLACE INTO ws_audit SELECT * FROM ws_audit WHERE seq=1').run(), /append-only/);
     const rows = (await ws.as(4, 'GET', '/api/ws/finance/summary')).json.entries;
     const receipt = rows.find((e) => e.kind === 'receipt');
     const rev = await ws.as(0, 'POST', `/api/ws/ledger/${h.app.db.prepare('SELECT id FROM ws_ledger WHERE seq=?').get(receipt.seq).id}/reverse`, { reason: 'Entered twice' });
@@ -412,6 +856,11 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     assert.equal((await ws.as(CHIEF, 'GET', '/api/ws/grievances')).json.grievances.length, 1);
     const log = (await ws.as(WORKER, 'GET', '/api/ws/me/access-log')).json.entries;
     assert.ok(log.some((e) => e.action === 'grievance.opened' && e.actor.startsWith('Ofelia'))); // the worker can see who opened their case
+    // ...but the audit log, which every officer can read, does not say who filed it (#44)
+    const workerId = ws.members[WORKER].id;
+    const auditLog = (await ws.as(CHIEF, 'GET', '/api/ws/audit')).json.chain.filter((e) => e.action.startsWith('grievance.'));
+    assert.ok(auditLog.length >= 2);
+    assert.deepEqual(auditLog.filter((e) => e.actorId === workerId || e.id === workerId), []);
   });
 
   it('the chief steward assigns a steward by re-sealing the case key to them', async () => {
@@ -430,6 +879,72 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     assert.equal((await ws.as(STEW, 'POST', `/api/ws/grievances/${id}/notes`, note)).status, 200);
     const seen = (await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json.notes[0];
     assert.match(C.openJson(key, seen, 'note|' + id).note, /met with the manager/);
+  });
+
+  it('a chief steward with no key for a case cannot work it, and assigning never replaces anyone\'s key', async () => {
+    // Ezra becomes a chief steward AFTER the case was filed, so no key for it was ever sealed to him
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[3].id, role: 'chief_steward', op: 'add' })).status, 200);
+    const before = h.app.db.prepare('SELECT sealed_keys k, assigned_to a, decision d, status s FROM ws_grievances WHERE id=?').get(id);
+    assert.equal((await ws.as(3, 'GET', '/api/ws/grievances')).json.grievances.length, 1); // he can see that cases exist...
+    const junk = C.boxSeal(ws.members[3].keys.boxPublicKey, C.randomBytes(32));
+    for (const [route, body] of [['assign', { stewardId: ws.members[3].id, sealedKey: junk }], ['decision', { decision: 'not_pursued', reasonCiphertext: 'x'.repeat(30), reasonNonce: 'y'.repeat(32) }],
+      ['notify-worker', {}], ['close', {}], ['steps/complete', { outcome: 'denied' }], ['notes', { ciphertext: 'x'.repeat(30), nonce: 'y'.repeat(32) }]]) {
+      const r = await ws.as(3, 'POST', `/api/ws/grievances/${id}/${route}`, body); // ...but cannot act on one he was never entrusted with, and is told why
+      assert.deepEqual([r.status, r.json.error], [409, 'no_case_key'], route);
+    }
+    assert.deepEqual(h.app.db.prepare('SELECT sealed_keys k, assigned_to a, decision d, status s FROM ws_grievances WHERE id=?').get(id), before); // nothing changed
+    // a key holder cannot overwrite another person's key either (a junk key would lock the real steward out)
+    const samKey = JSON.parse(before.k)[ws.members[STEW].id];
+    assert.ok(samKey);
+    assert.equal((await ws.as(CHIEF, 'POST', `/api/ws/grievances/${id}/assign`, { stewardId: ws.members[STEW].id, sealedKey: C.boxSeal(ws.members[STEW].keys.boxPublicKey, C.randomBytes(32)) })).status, 200);
+    assert.equal(JSON.parse(h.app.db.prepare('SELECT sealed_keys k FROM ws_grievances WHERE id=?').get(id).k)[ws.members[STEW].id], samKey);
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[3].id, role: 'chief_steward', op: 'remove' })).status, 200);
+  });
+
+  it('when a new chief steward takes over, whoever holds the case key can hand it on, so no case is left stranded', async () => {
+    const EZRA = 3;
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'add' })).status, 200);
+    const mine = (await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.deepEqual(mine.missingKeys, [{ memberId: ws.members[EZRA].id, name: 'Ezra Qqqelect', boxPublicKey: ws.members[EZRA].keys.boxPublicKey }]); // the worker is shown who cannot read it yet
+    const his = (await ws.as(EZRA, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.deepEqual([his.canWork, his.sealedKey], [false, null]); // not offered work he cannot do
+    const share = (i, memberId, sealedKey) => ws.as(i, 'POST', `/api/ws/grievances/${id}/share`, { memberId, sealedKey });
+    const toEzra = C.boxSeal(ws.members[EZRA].keys.boxPublicKey, key);
+    assert.equal((await share(OTHER, ws.members[EZRA].id, toEzra)).status, 404); // someone with no part in the case
+    assert.equal((await share(EZRA, ws.members[EZRA].id, toEzra)).json.error, 'no_case_key'); // nobody hands a case to themselves
+    assert.equal((await share(WORKER, ws.members[OTHER].id, C.boxSeal(ws.members[OTHER].keys.boxPublicKey, key))).json.error, 'steward_not_found'); // only to a steward
+    assert.equal((await share(CHIEF, ws.members[EZRA].id, toEzra)).status, 200); // the outgoing chief (or the worker) hands it on
+    const g = (await ws.as(EZRA, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.equal(g.canWork, true);
+    assert.match(C.openJson(openKey(EZRA, g.sealedKey), g.content, 'grievance|' + id).what, /hours were cut/);
+    assert.deepEqual((await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json.missingKeys, []);
+    assert.equal((await share(WORKER, ws.members[EZRA].id, C.boxSeal(ws.members[EZRA].keys.boxPublicKey, C.randomBytes(32)))).status, 200); // a second hand-over...
+    assert.equal(JSON.parse(h.app.db.prepare('SELECT sealed_keys k FROM ws_grievances WHERE id=?').get(id).k)[ws.members[EZRA].id], toEzra); // ...never replaces a key
+    assert.ok((await ws.as(WORKER, 'GET', '/api/ws/me/access-log')).json.entries.some((e) => e.action === 'grievance.shared')); // and the worker sees it happened
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[OTHER].id, role: 'steward', op: 'add' })).status, 200);
+    assert.deepEqual((await share(WORKER, ws.members[OTHER].id, C.boxSeal(ws.members[OTHER].keys.boxPublicKey, key))).json, { shared: true }); // the worker hands it on themselves
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[OTHER].id, role: 'steward', op: 'remove' })).status, 200);
+    const seen = (await ws.as(CHIEF, 'GET', '/api/ws/audit')).json.chain.filter((e) => e.action.startsWith('grievance.'));
+    assert.deepEqual(seen.filter((e) => e.actorId === ws.members[WORKER].id), []); // the worker's own hand-over does not name them either
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'remove' })).status, 200);
+  });
+
+  it('a key that does not open can be dropped by the person it was given to, so a real one can be shared', async () => {
+    const EZRA = 3;
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'add' })).status, 200);
+    const keysNow = () => JSON.parse(h.app.db.prepare('SELECT sealed_keys k FROM ws_grievances WHERE id=?').get(id).k);
+    const had = keysNow()[ws.members[EZRA].id];
+    if (had) { // from the earlier hand-over: start this test from a junk key instead
+      const k = keysNow(); k[ws.members[EZRA].id] = C.boxSeal(ws.members[EZRA].keys.boxPublicKey, C.randomBytes(32)); h.app.db.prepare('UPDATE ws_grievances SET sealed_keys=? WHERE id=?').run(JSON.stringify(k), id);
+    }
+    const drop = (i) => ws.as(i, 'POST', `/api/ws/grievances/${id}/drop-my-key`);
+    assert.equal((await drop(OTHER)).status, 404); // not a party to the case
+    assert.equal((await drop(WORKER)).json.error, 'worker_key'); // the worker's own key is never dropped
+    assert.equal((await drop(EZRA)).status, 200);
+    assert.equal(keysNow()[ws.members[EZRA].id], undefined);
+    assert.ok((await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json.missingKeys.some((m) => m.memberId === ws.members[EZRA].id)); // offered again
+    assert.equal((await ws.as(CHIEF, 'POST', `/api/ws/grievances/${id}/share`, { memberId: ws.members[EZRA].id, sealedKey: C.boxSeal(ws.members[EZRA].keys.boxPublicKey, key) })).json.shared, true);
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'remove' })).status, 200);
   });
 
   it('steps start their own clocks, and overdue steps show up for the union', async () => {
@@ -477,8 +992,20 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
   it('union health shows aggregates only and hides small groups', async () => {
     const hl = (await ws.as(0, 'GET', '/api/ws/health')).json;
     assert.deepEqual([hl.unitSize, hl.members], [8, 7]);
-    assert.deepEqual(hl.shifts.find((x) => x.shift === 'Day'), { shift: 'Day', total: 6, members: 6 });
     assert.deepEqual(hl.shifts.find((x) => x.shift === 'Night'), { shift: 'Night', suppressed: true }); // 2 people: hidden
+    // ...and Day too: otherwise 8 people in all, minus the 6 on Day, gives Night's size away
+    assert.deepEqual(hl.shifts.find((x) => x.shift === 'Day'), { shift: 'Day', suppressed: true });
+    // with three shifts, one small one hidden, the next smallest is hidden with it and the largest still shows
+    const t = await makeWorkspace(h, [...Array.from({ length: 7 }, (_, i) => person(`Day${i} Qqq`, i, { shift: 'Day', ...(i === 0 ? { roles: ['officer'] } : {}) })),
+      ...Array.from({ length: 5 }, (_, i) => person(`Eve${i} Qqq`, i, { shift: 'Evening' })), ...Array.from({ length: 2 }, (_, i) => person(`Night${i} Qqq`, i, { shift: 'Night' }))]);
+    const three = (await t.as(0, 'GET', '/api/ws/health')).json.shifts;
+    assert.deepEqual(three.filter((x) => x.suppressed).map((x) => x.shift).sort(), ['Evening', 'Night']);
+    assert.deepEqual(three.find((x) => x.shift === 'Day'), { shift: 'Day', total: 7, members: 7 });
+    // two tiny groups hidden together still add up to only 2 people, and the members total would tell their status: keep hiding until 5 or more
+    const u = await makeWorkspace(h, [...Array.from({ length: 10 }, (_, i) => person(`D${i} Qqq`, i, { shift: 'Day', ...(i === 0 ? { roles: ['officer'] } : {}) })),
+      ...Array.from({ length: 6 }, (_, i) => person(`E${i} Qqq`, i, { shift: 'Evening' })), person('N0 Qqq', 1, { shift: 'Night' }), person('W0 Qqq', 2, { shift: 'Weekend' })]);
+    const four = (await u.as(0, 'GET', '/api/ws/health')).json.shifts;
+    assert.deepEqual(four.filter((x) => x.suppressed).map((x) => x.shift).sort(), ['Evening', 'Night', 'Weekend']);
     assert.equal((await ws.as(4, 'GET', '/api/ws/health')).status, 403);
     const cal = (await ws.as(0, 'GET', '/api/ws/compliance')).json.tasks;
     assert.ok(cal.find((t) => t.key === 'lm1').dueOn);

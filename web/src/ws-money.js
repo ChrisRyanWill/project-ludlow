@@ -2,7 +2,7 @@
 // unbroken chain. This device also remembers the newest entry it has seen, so rewriting history later
 // shows up as a loud warning the next time anyone opens this page.
 import * as C from '../../shared/crypto.js';
-import { verifyChain, ledgerFields, checkPinned } from '../../shared/verify.js';
+import { verifyChain, ledgerFields, checkPinned, checkCommitments } from '../../shared/verify.js';
 import { store } from './store.js';
 import { t } from './i18n.js';
 import { WS, wcall, can, has, wsFrame, currency } from './wsbase.js';
@@ -19,6 +19,7 @@ export async function MoneyTab() {
   const v = verifyChain(chain.entries, ledgerFields);
   const pinKey = `pin.${WS.workspaceId}`, pin = store.get(pinKey);
   const pinned = v.ok ? checkPinned(chain.entries, pin) : { ok: false };
+  const texts = checkCommitments(s.entries, chain.entries); // payee and memo against the commitment in each entry
   if (v.ok && pinned.ok && v.head && (!pin || v.head.seq > pin.seq)) store.set(pinKey, v.head);
   const $ = (c) => money(c, currency());
   const F = { rc: { category: 'dues', amount: '', payer: '', memo: '' }, pay: { category: 'office', amount: '', payee: '', memo: '' } };
@@ -27,7 +28,8 @@ export async function MoneyTab() {
     h1(t('Money')),
     !v.ok ? callout('danger', strong(t('The books do not add up.')), ' ', t('Your browser found that the ledger was changed near entry {n}. Do not trust these numbers. Tell your officers and members right away.', { n: v.brokenAt }))
       : !pinned.ok ? callout('danger', strong(t('The history changed.')), ' ', t('On an earlier visit this device saw entries that are now different or missing. Someone may have rewritten the books. Tell your members right away.'))
-        : callout('ok', t('Checked in your browser: all {n} ledger entries form an unbroken chain, and nothing this device saw before has changed.', { n: v.count }), v.head ? span({ class: 'small' }, ' ', t('Fingerprint:'), ' ', strong(C.fingerprint(v.head.hash)), ' ', t('(compare with a coworker\'s. If they differ, something is wrong.)')) : null),
+        : !texts.ok ? callout('danger', strong(t('Who was paid was changed.')), ' ', t('The payee or note shown for entry {n} is not what was recorded when the entry was made. Do not trust it. Tell your officers and members right away.', { n: texts.brokenAt }))
+        : callout('ok', t('Checked in your browser: all {n} ledger entries form an unbroken chain, and nothing this device saw before has changed.', { n: v.count }), texts.checked ? ' ' + t('The payee and note of {c} entries match what was recorded.', { c: texts.checked }) : '', v.head ? span({ class: 'small' }, ' ', t('Fingerprint:'), ' ', strong(C.fingerprint(v.head.hash)), ' ', t('(compare with a coworker\'s. If they differ, something is wrong.)')) : null),
     div({ class: 'card' }, div({ class: 'tile big' }, div({ class: 'tile-n' }, $(s.balanceCents)), div({ class: 'tile-l' }, t('in the union\'s account'))),
       p({ class: 'small muted' }, t('Spending of {x} or more needs two different officers to approve. Nobody approves their own request.', { x: $(s.twoApprovalCents) }))),
     div({ class: 'grid2' },

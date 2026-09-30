@@ -159,6 +159,9 @@ export function route(pattern, fn) {
   routes.push({ re, keys, fn });
 }
 export const fragment = () => new URLSearchParams(location.hash.slice(1));
+// Links carry their secrets after the #, which the server never sees. Once a page has read them, take them out of the address bar so they don't
+// stay on screen or in the browser's history (which may sync to other devices).
+export const scrubFragment = () => { try { history.replaceState(null, '', location.pathname + location.search); } catch { /* not fatal */ } };
 export const wipers = []; // functions that zero in-memory keys on quick exit
 export function setTitle(text, sensitive = false) {
   document.title = sensitive && !store.get('showTitle') ? 'Notes' : `${text} · Project Ludlow`;

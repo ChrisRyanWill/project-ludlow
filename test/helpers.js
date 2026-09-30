@@ -13,11 +13,13 @@ export async function startApp(over = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'ludlow-'));
   const logs = [];
   setLogSink((l) => logs.push(l));
-  const app = await createApp({ dbPath: path.join(dir, 'test.db'), masterKey: C.b64(C.randomBytes(32)), rateLimitDisabled: true, emailProvider: 'dev', ...over });
+  const app = await createApp({ dbPath: path.join(dir, 'test.db'), masterKey: C.b64(C.randomBytes(32)), rateLimitDisabled: true, emailProvider: 'dev', minVoteHours: 0, ...over }); // minVoteHours 0: tests open votes that close in an hour, not a day
   const port = await app.listen(0, '127.0.0.1');
   const base = `http://127.0.0.1:${port}`;
   async function call(method, url, { body, auth } = {}) {
-    const r = await fetch(base + url, { method, headers: { 'content-type': 'application/json', ...(auth ? { authorization: auth } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const raw = body ? JSON.stringify(body) : undefined;
+    if (auth?.signFor) auth = auth.signFor(raw);
+    const r = await fetch(base + url, { method, headers: { 'content-type': 'application/json', ...(auth ? { authorization: auth } : {}) }, body: raw });
     let json = null;
     try { json = await r.json(); } catch { /* not json */ }
     return { status: r.status, json, headers: r.headers };
@@ -37,12 +39,13 @@ export async function startApp(over = {}) {
   return { app, base, call, logs, dir, leaks, stop: async () => { await app.close(); rmSync(dir, { recursive: true, force: true }); setLogSink((l) => process.stdout.write(l + '\n')); } };
 }
 
+// Trustee signatures cover the exact body, which is only known when the request is sent, so this returns a signer that call() applies.
 export async function trusteeAuth(h, keys, index, route, campaignId) {
   const { json } = await h.call('POST', '/api/auth/challenge');
-  return `Sig ${json.challengeId}.${index}.${C.signAuth(keys.signSecretKey, { nonce: json.nonce, route, scope: campaignId })}`;
+  return { signFor: (raw) => `Sig ${json.challengeId}.${index}.${C.signAuth(keys.signSecretKey, { nonce: json.nonce, route, scope: campaignId, bodyHash: C.bodyHash(raw) })}` };
 }
 
-export async function makeCampaign(h, { n = 3, k = 2, meta = {}, releaseMin = 1, enroll = n } = {}) {
+export async function makeCampaign(h, { n = 3, k = 2, meta = {}, releaseMin = 1, enroll = n, confirm = true } = {}) {
   const id = randomUUID(), campaignKey = C.newCampaignKey();
   const enrollTokens = Array.from({ length: n }, () => C.newToken());
   const fullMeta = { unionName: 'Test Workers United', employerName: 'Acme Corp', estimatedUnitSize: 10, unitDescription: 'All staff', trusteeNames: [], ...meta };
@@ -56,7 +59,19 @@ export async function makeCampaign(h, { n = 3, k = 2, meta = {}, releaseMin = 1,
     if (e.status !== 200) throw new Error('enroll failed: ' + JSON.stringify(e.json));
     trustees.push({ index: i + 1, keys });
   }
-  return { id, k, n, campaignKey, trustees, enrollTokens, meta: fullMeta };
+  const camp = { id, k, n, campaignKey, trustees, enrollTokens, meta: fullMeta, confirmed: false };
+  if (enroll === n && confirm) await confirmRoster(h, camp); // a committee that is complete from the start is signed by its founder straight away
+  return camp;
+}
+
+// The founder signs the roster of the whole committee (docs/PROTOCOL.md 1a). Until then cards are sealed to the founder alone, however many trustees have joined.
+export async function confirmRoster(h, camp) {
+  const ts = [...camp.trustees].sort((a, b) => a.index - b.index);
+  const roster = { campaignId: camp.id, k: camp.k, n: camp.n, seats: ts.map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey })) };
+  const signature = C.signRoster(ts[0].keys.signSecretKey, roster);
+  const r = await h.call('POST', `/api/campaigns/${camp.id}/roster`, { auth: await trusteeAuth(h, ts[0].keys, 1, 'POST /api/campaigns/:id/roster', camp.id), body: { roster, signature } });
+  if (r.status === 200) camp.confirmed = true;
+  return { r, roster, signature };
 }
 
 export async function enrollTrustee(h, camp, index, token = camp.enrollTokens[index - 1]) {
@@ -82,7 +97,7 @@ export async function signCard(h, camp, inviteToken, who = {}, { group = false }
     legalName: who.name || 'Pat Signer', personalEmail: who.email || 'pat@example.org', phone: who.phone || '+15555550100', employerName: camp.meta.employerName,
     unionName: camp.meta.unionName, cardText: 'I authorize the union to represent me.', cardTextSha256: 'x', typedSignature: who.name || 'Pat Signer', consentChecked: true, clientSignedAt: new Date().toISOString(), ...who.extra,
   };
-  const enc = camp.trustees.length < camp.n
+  const enc = !camp.confirmed
     ? C.encryptCardSolo({ campaignId: camp.id, templateVersion: 'card-v1', payload, founder: { index: 1, boxPublicKey: camp.trustees[0].keys.boxPublicKey } })
     : await C.encryptCard({ campaignId: camp.id, templateVersion: 'card-v1', payload, trustees: camp.trustees.map((t) => ({ index: t.index, boxPublicKey: t.keys.boxPublicKey })), k: camp.k });
   const vouch = group ? C.vouchCode() : null;
@@ -105,9 +120,9 @@ export async function login(h, m) {
   return m;
 }
 
-export async function makeWorkspace(h, people, { stage = 'recognized' } = {}) {
+export async function makeWorkspace(h, people, { stage = 'recognized', fiscalYearStart } = {}) {
   const claims = people.map(() => C.newToken());
-  const r = await h.call('POST', '/api/ws', { body: { confirmedPublic: true, stage, unionName: 'Leakcheck Workers United', employerName: 'Leakcheck Industries LLC', jurisdiction: 'us-nlra', members: people.map((p, i) => ({ ...p, legalName: p.name, claimTokenHash: C.hashToken(claims[i]), status: p.status ?? 'member' })) } });
+  const r = await h.call('POST', '/api/ws', { body: { confirmedPublic: true, stage, ...(fiscalYearStart ? { fiscalYearStart } : {}), unionName: 'Leakcheck Workers United', employerName: 'Leakcheck Industries LLC', jurisdiction: 'us-nlra', members: people.map((p, i) => ({ ...p, legalName: p.name, claimTokenHash: C.hashToken(claims[i]), status: p.status ?? 'member' })) } });
   if (r.status !== 200) throw new Error('create workspace failed: ' + JSON.stringify(r.json));
   const wsId = r.json.workspaceId;
   const members = [];
@@ -118,5 +133,5 @@ export async function makeWorkspace(h, people, { stage = 'recognized' } = {}) {
     members.push(await login(h, { id: c.json.memberId, keys, ...people[i] }));
   }
   const as = (i, method, url, body) => h.call(method, url, { body, auth: members[i].auth });
-  return { wsId, members, as };
+  return { wsId, members, as, h };
 }

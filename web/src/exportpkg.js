@@ -3,6 +3,7 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { zip, toCsv } from './zip.js';
 import { fill, cardBody } from './ui.js';
+import { cardTextMatches } from '../../shared/verify.js';
 
 export const DRAFT_FOOTER = 'DRAFT: review with a labor attorney before filing or sending.';
 const enc = new TextEncoder();
@@ -79,7 +80,7 @@ export async function cardsPdf(cards, meta) {
     y -= 8;
     page.drawText(P.safe(`Typed signature: ${c.payload.typedSignature}`), { x: P.M, y, size: 13, font: P.bold }); y -= 22;
     const facts = [
-      ['Date signed (server clock, UTC)', c.createdAt], ['Card version', c.templateVersion], ['Card text SHA-256', c.payload.cardTextSha256],
+      ['Date signed (server clock, UTC)', c.createdAt], ['Card version', c.templateVersion], ['Card text SHA-256', `${c.payload.cardTextSha256}${cardTextMatches(c.payload) ? ' (matches the text above)' : ' (DOES NOT MATCH the text above: check this card)'}`],
       ['Confirmation email sent (UTC)', c.confirmationSentAt || 'not sent'], ['Disavowed by signer', c.disavowedAt || 'no'],
     ];
     for (const [k, v] of facts) { for (const l of P.wrap(`${k}: ${v}`, P.font, 9, P.W - 2 * P.M)) { page.drawText(l, { x: P.M, y, size: 9, font: P.font }); y -= 12; } }
@@ -99,6 +100,7 @@ export function buildRoster(cards, meta) {
     if (phones.get(digits(c.payload.phone)) > 1) flags.push('duplicate phone');
     if (!c.confirmationSentAt) flags.push('no confirmation sent');
     if (c.disavowedAt) flags.push('DISAVOWED by signer');
+    if (!cardTextMatches(c.payload)) flags.push('CARD TEXT DOES NOT MATCH ITS FINGERPRINT');
     return { n: i + 1, card: c, flags };
   });
 }
