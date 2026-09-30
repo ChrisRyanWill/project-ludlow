@@ -553,6 +553,12 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
     await dan2.getByText('The contract covers scheduling changes.').waitFor();
     await dan2.getByText('We will pursue this').waitFor();
     assert.deepEqual(h.leaks(['The contract covers scheduling changes']), []);
+    // Locking ends the session on the server too, not only in this tab
+    const sessions = () => h.app.db.prepare('SELECT COUNT(*) c FROM ws_sessions').get().c;
+    const before = sessions();
+    const [logout] = await Promise.all([dan2.waitForResponse((r) => r.url().endsWith('/api/ws/auth/logout')), btn(dan2, 'Lock').click()]);
+    assert.equal(logout.status(), 200);
+    assert.equal(sessions(), before - 1);
     assert.deepEqual(problems, []);
   });
 

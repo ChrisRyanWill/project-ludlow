@@ -7,7 +7,14 @@ import { packOf } from './packs.js';
 import { div, span, p, h1, a, nav, btn, badge, shell, wipers, go, linkBtn } from './ui.js';
 
 export let WS = null; // { token, keys, memberId, workspaceId, info }
-wipers.push(() => { WS = null; });
+// Locking or leaving ends the session on the server too, so the token in memory is worthless even if it was copied. keepalive lets the request
+// finish while the page is being left (quick exit); nothing waits for it.
+export function endSession() {
+  const token = WS?.token;
+  WS = null;
+  if (token) { try { fetch('/api/ws/auth/logout', { method: 'POST', keepalive: true, headers: { Authorization: 'Bearer ' + token } }).catch(() => {}); } catch { /* leaving anyway */ } }
+}
+wipers.push(endSession);
 export const setWS = (v) => { WS = v; };
 
 export async function signIn(keys, memberId) {
@@ -41,7 +48,7 @@ export function wsFrame(active, ...content) {
   const tabs = nav({ class: 'tabs', 'aria-label': t('Workspace') }, div({ class: 'tabs-in' }, TABS.filter((x) => x[3]()).map(([k, href, label]) => a({ href, 'aria-current': k === active ? 'page' : undefined }, t(label)))));
   return shell(div(
     div({ class: 'ws-head' }, div(span({ class: 'ws-union' }, WS.info.workspace.unionName), ' ', badge(WS.info.workspace.stage === 'recognized' ? t('Recognized') : t('Public, not yet recognized'), WS.info.workspace.stage === 'recognized' ? 'ok' : 'warn')),
-      div({ class: 'row' }, span({ class: 'small muted' }, WS.info.member.name), btn(t('Lock'), () => { WS = null; go('/w'); }, { kind: 'secondary small' }))),
+      div({ class: 'row' }, span({ class: 'small muted' }, WS.info.member.name), btn(t('Lock'), () => { endSession(); go('/w'); }, { kind: 'secondary small' }))),
     ...content), { wide: true, nav: tabs });
 }
 
