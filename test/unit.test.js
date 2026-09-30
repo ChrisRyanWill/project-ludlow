@@ -517,22 +517,73 @@ test('a trustee can check that the roster the founder signed contains their own 
   refuses(() => checkMySeat(w.raw(), w.commit, 'camp-2', 2, w.ts[1].keys.boxPublicKey), 'roster_invalid');
 });
 
-test('frontend trust: everything sealed for the trustees goes through the roster check, and invitation links carry the founder\'s key check', () => {
-  const dir = path.resolve(import.meta.dirname, '../web/src');
-  const seals = /\b(encryptCard|encryptCardSolo|sealForTrustees|reshareCard)\(/;
-  for (const f of readdirSync(dir)) {
-    const src = readFileSync(path.join(dir, f), 'utf8');
-    if (seals.test(src)) {
-      // a file that seals for the trustees must authenticate the keys first (shared/roster.js), and never seal straight to the server's list
-      assert.ok(/\b(authenticate|rosterToSign)\(/.test(src), `${f} seals for the trustees without authenticating their keys`);
-      for (const line of src.split('\n')) if (seals.test(line)) assert.ok(!/raw\.trustees|meta\.trustees|\.trustees\.map/.test(line), `${f} seals straight to the server's list of keys: ${line.trim().slice(0, 90)}`);
+// The browser code may seal for the trustees only to keys shared/roster.js has authenticated, and every invitation link carries the founder's key
+// check. This reads web/src and returns what breaks those rules. It is deliberately strict about shape: each sealing call must name an authenticated
+// source directly, so routing the server's list through a variable, an alias or a helper is caught too.
+function trustViolations(files) {
+  const out = [];
+  const SEALS = ['encryptCard', 'encryptCardSolo', 'sealForTrustees', 'reshareCard'];
+  const args = (src, at) => { // the text between the parentheses that open at `at`
+    let depth = 0;
+    for (let i = at; i < src.length; i++) { if (src[i] === '(') depth++; else if (src[i] === ')' && --depth === 0) return src.slice(at + 1, i); }
+    return '';
+  };
+  for (const [f, src] of Object.entries(files)) {
+    for (const name of SEALS) {
+      for (const m of src.matchAll(new RegExp(`\\b${name}\\b`, 'g'))) {
+        if (src[m.index + name.length] !== '(') { out.push(`${f}: ${name} used other than by calling it (an alias?)`); continue; }
+        const a = args(src, m.index + name.length).replace(/\s+/g, ' ');
+        const ok = name === 'encryptCard' ? /\btrustees: sealTo\.seats\b/.test(a) && /\bk: sealTo\.k\b/.test(a)
+          : name === 'encryptCardSolo' ? /\bfounder: sealTo\.seats\[0\]/.test(a)
+            : name === 'sealForTrustees' ? /, sealTo\.seats, /.test(a)
+              : /, seats, k$/.test(a.trim()); // reshareCard only inside relock(seats, k)
+        if (!ok) out.push(`${f}: ${name}(${a.slice(0, 70)}) does not seal to authenticated keys`);
+      }
     }
-    // signing invitations, and invitations for a trustee seat, carry the founder's key check (the founder's own first link cannot: their keys do not exist yet)
-    for (const m of src.matchAll(/linkTo\('\/(j|t)',\s*\{([^}]*)\}/g)) {
-      const firstFounderLink = m[1] === 't' && /\be: tok\b/.test(m[2]);
-      assert.ok(firstFounderLink || /\bf:/.test(m[2]), `${f}: an invitation link is built without the founder's key check: ${m[0].slice(0, 90)}`);
+    // where those authenticated keys come from
+    for (const m of src.matchAll(/\bsealTo\s*=\s*([A-Za-z_.]+)\(/g)) if (m[1] !== 'authenticate') out.push(`${f}: sealTo assigned from ${m[1]}()`);
+    for (const m of src.matchAll(/\bsealTo\s*=(?!=)\s*(?=\S)(?![A-Za-z_.]+\()/g)) out.push(`${f}: sealTo assigned from something other than a call: ${src.slice(m.index, m.index + 50)}`);
+    for (const m of src.matchAll(/\brelock\(([^)]*)\)/g)) {
+      const a = m[1].replace(/\s+/g, ' ').trim();
+      if (a === 'seats, k') continue; // its own definition
+      if (!['roster.seats, roster.k', 'a.seats, a.k'].includes(a)) out.push(`${f}: relock(${a}) with keys that were not signed`);
+    }
+    if (/\brelock\(/.test(src)) {
+      if (!/\bconst roster = rosterToSign\(/.test(src) || /\broster = (?!rosterToSign\()/.test(src)) out.push(`${f}: roster does not come from rosterToSign()`);
+      if (!/\bconst a = authenticate\(/.test(src) || /\ba = (?!authenticate\()/.test(src.replace(/\bconst a = authenticate\(/g, ''))) out.push(`${f}: a does not come from authenticate()`);
+    }
+    // invitation and member links: an object literal carrying f (the founder's own first link cannot: their keys do not exist yet)
+    for (const m of src.matchAll(/linkTo\('\/(j|t|m)',\s*/g)) {
+      const rest = src.slice(m.index + m[0].length);
+      if (rest[0] !== '{') { out.push(`${f}: a /${m[1]} link is built from something other than an object literal`); continue; }
+      let depth = 0, end = 0;
+      for (let i = 0; i < rest.length; i++) { if (rest[i] === '{') depth++; else if (rest[i] === '}' && --depth === 0) { end = i; break; } }
+      const obj = rest.slice(0, end + 1);
+      const firstFounderLink = m[1] === 't' && /\be: tok\b/.test(obj);
+      if (!firstFounderLink && !/\bf: (?!undefined\b|null\b|''|"")[A-Za-z_]/.test(obj)) out.push(`${f}: a /${m[1]} link is built without the founder's key check: ${obj.slice(0, 80)}`);
     }
   }
+  return out;
+}
+
+test('frontend trust: everything sealed for the trustees goes through the roster check, and invitation links carry the founder\'s key check', () => {
+  const dir = path.resolve(import.meta.dirname, '../web/src');
+  const files = Object.fromEntries(readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => [f, readFileSync(path.join(dir, f), 'utf8')]));
+  assert.deepEqual(trustViolations(files), []);
+  // The check itself must catch the ways this has gone wrong or nearly did (the first is the code before the roster existed).
+  const mutate = (f, from, to) => { assert.ok(files[f].includes(from), `mutation no longer applies: ${from}`); return { ...files, [f]: files[f].replace(from, to) }; };
+  const mutants = {
+    'relock to the server\'s list': mutate('trustee.js', 'await relock(roster.seats, roster.k);', '{ const trustees = raw.trustees.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey })); await relock(trustees, raw.k); }'),
+    'report to the server\'s list via a variable': mutate('organize.js', 'sealTo.seats, rid)', 'fromServer, rid)'),
+    'card to the server\'s list via a variable': mutate('organize.js', 'trustees: sealTo.seats, k: sealTo.k', 'trustees: all, k: raw.k'),
+    'sealTo from the server': mutate('organize.js', 'sealTo = authenticate(raw, fc, c);', 'sealTo = { mode: raw.roster ? "shamir" : "solo", seats: raw.trustees, k: raw.k };'),
+    'aliased seal function': mutate('organize.js', 'C.encryptCard({', '(0, C.encryptCard)({'),
+    'invitation with f: undefined': mutate('organize.js', "linkTo('/j', { i: token, k, c, f: saved.founder })", "linkTo('/j', { i: token, k, c, f: undefined })"),
+    'invitation built from a variable': mutate('organize.js', "linkTo('/j', { i: token, k, c, f: saved.founder })", 'linkTo(\'/j\', P)'),
+    'member link without f': mutate('organize.js', "linkTo('/m', { s: R.secret, k, c, f: fc })", "linkTo('/m', { s: R.secret, k, c })"),
+    'trustee seat link without f': mutate('trustee.js', 'c: T.campaignId, f: T.founder }); // the link carries', 'c: T.campaignId }); // the link carries'),
+  };
+  for (const [name, m] of Object.entries(mutants)) assert.ok(trustViolations(m).length > 0, `the tripwire misses: ${name}`);
 });
 
 test('master key: the development key file is never made for a server reachable from other machines', () => {
