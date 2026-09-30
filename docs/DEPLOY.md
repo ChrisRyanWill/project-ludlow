@@ -52,6 +52,29 @@ docker run -d --name ludlow --restart unless-stopped \
 
 Every setting is listed in the README's [Configuration](../README.md#configuration) table.
 
+### Without Docker
+
+Node 20.6 or later (for `--env-file`), on the same machine as the proxy, as an unprivileged user:
+
+```bash
+git clone https://github.com/ChrisRyanWill/project-ludlow.git && cd project-ludlow
+npm ci && npm run build && npm prune --omit=dev   # the build tools are only needed to build
+# an env file readable only by this user (chmod 600):
+#   NODE_ENV=production
+#   HOST=127.0.0.1
+#   PORT=8787
+#   DATABASE_PATH=/var/lib/ludlow/ludlow.db
+#   APP_BASE_URL=https://union.example.org
+#   WORKSPACE_MASTER_KEY=(the key from step 3)
+#   TRUST_PROXY=1
+#   EMAIL_PROVIDER=postmark, POSTMARK_SERVER_TOKEN, EMAIL_FROM, CONFIRMATION_REPLY_TO
+node --env-file=/etc/ludlow.env server/index.js
+```
+
+- **Set `NODE_ENV=production`.** `npm start` does not set it. Without it the server allows development settings, including the test outbox below.
+- **Run it under a service manager** (for example a systemd unit with `Restart=always` and `EnvironmentFile=/etc/ludlow.env`) so it comes back after a reboot.
+- **After every update**, run the same install, build and prune again, then restart.
+
 ## 5. HTTPS in front (Caddy)
 
 `/etc/caddy/Caddyfile`:
@@ -65,6 +88,7 @@ union.example.org {
 }
 ```
 
+- **The proxy's error log is separate.** `output discard` above silences Caddy's access log only. Caddy's own runtime log, and nginx's `error_log`, can still record client addresses and request paths, for example when a connection to the app fails during a restart. Send them somewhere you control and keep them briefly (for example `journalctl --vacuum-time=2d`), or lower their level.
 - **Access logs are discarded here on purpose.** The app itself logs only the method, route pattern, status, duration and time: no addresses, no paths with ids, no bodies. A proxy that logs full URLs and addresses would undo that.
 - **nginx:** turn `access_log` off for this site, and set `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`.
 
@@ -85,11 +109,22 @@ The app sends its own strict security headers (CSP, HSTS, no referrer). Do not a
   docker cp ludlow:/data/backup.db ./ludlow-$(date +%F).db
   ```
 
+- **A backup is as sensitive as the live database.** Treat every copy the way you treat the server.
 - **Encrypt backups before they leave the server**, for example with `age` or `gpg`. Keep them away from the master key.
 - **What a stolen backup would show:**
   - Campaign data is ciphertext the server cannot read, but a copy still shows counts, times and who invited whom.
   - The workspace's personal fields need the master key.
   - The threat model lists exactly what a copy shows.
+- **To restore** a backup into the Docker volume: stop the app, copy the file in, give it to the app's user, start again. A plain `docker cp` leaves the file owned by root, and the app (which runs as the `node` user) then cannot write to it.
+
+  ```bash
+  docker stop ludlow
+  docker run --rm -v ludlow-data:/data -v "$PWD":/backup alpine \
+    sh -c 'cp /backup/ludlow-2026-10-01.db /data/ludlow.db && rm -f /data/ludlow.db-journal && chown 1000:1000 /data/ludlow.db'
+  docker start ludlow
+  ```
+
+  The same master key must be set: a backup restored under a different key cannot open the workspace's encrypted fields. After restoring, open `/verify` and sign in once as a test.
 - **Idle campaigns are deleted on their own** after `CAMPAIGN_INACTIVITY_DAYS` (180 by default). Old backups keep them. Delete backups you no longer need.
 
 ## 8. Update it
@@ -106,5 +141,6 @@ git pull && docker build -t project-ludlow . && docker stop ludlow && docker rm 
 
 - **Run one instance.** Sign-in challenges and rate limits are kept in memory.
 - **Do not set `RATE_LIMIT_DISABLED`** on a real server. It is for tests.
+- **The test outbox.** With `EMAIL_PROVIDER=dev` and `NODE_ENV` not set to production, the server keeps confirmation emails (signers' names and contact details) in memory and shows them at `/dev/outbox`, without signing in. It answers only a request made directly on the server's own machine, never one passed on by a proxy, but a real server should not run in this mode at all: set `NODE_ENV=production` and a real email provider.
 - **Leave `ONLINE_OFFICER_ELECTIONS` off** until an attorney has approved online officer elections for your union.
 - **If something goes wrong,** report security problems privately as described in [SECURITY.md](../SECURITY.md). Trustees can pause signing at once from their dashboard.
