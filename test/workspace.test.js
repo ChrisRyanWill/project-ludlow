@@ -435,6 +435,14 @@ describe('workspace: members can check who was paid, not only how much (#41)', (
     assert.equal(e2.find((e) => e.seq === 1).payee, 'Somebody Else');
     assert.deepEqual(checkCommitments(e2, c2), { ok: false, checked: 2, brokenAt: 1 });
     assert.equal(verifyChain(c2, ledgerFields).ok, true); // the chain alone would not have noticed
+    // ...nor may it be hidden by also dropping the salt, or by damaging the memo so that nothing can be checked
+    h.app.db.prepare('UPDATE ws_ledger SET memo_enc=? WHERE id=?').run(h.app.kms.enc(dk, JSON.stringify({ memo: 'Zyxwvut memo' }), 'ledger.memo', row.id), row.id);
+    const [e3, c3] = await read();
+    assert.equal(e3.find((e) => e.seq === 1).salt, undefined);
+    assert.deepEqual(checkCommitments(e3, c3), { ok: false, checked: 2, brokenAt: 1 });
+    h.app.db.prepare('UPDATE ws_ledger SET memo_enc=? WHERE id=?').run('v2.AAAA.BBBB', row.id);
+    const [e4, c4] = await read();
+    assert.deepEqual(checkCommitments(e4, c4), { ok: false, checked: 2, brokenAt: 1 });
   });
 });
 

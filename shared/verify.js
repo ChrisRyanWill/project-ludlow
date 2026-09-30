@@ -2,6 +2,7 @@
 // the one before it (hash chain), so history cannot be rewritten without every later hash changing.
 // The server publishes the chain; the client re-derives every hash and compares.
 import { chainHash, GENESIS, sha256Hex, sha256Text } from './crypto.js';
+import { REDACTED_CATEGORIES } from './constants.js';
 
 // A card carries the SHA-256 of the exact text the signer saw. When the trustees open it, the text must still match: a card that does not was
 // made by altered code (or has a bug), and is flagged rather than trusted. (The encryption already stops anyone else changing it.)
@@ -41,11 +42,10 @@ export function checkPinned(entries, pin) {
 // and are skipped. `entries` come from the summary, `chain` from the chain route.
 export function checkCommitments(entries, chain) {
   const commitOf = new Map(chain.map((c) => [c.seq, c.commit]));
-  let checked = 0;
-  for (const e of [...entries].sort((a, b) => a.seq - b.seq)) {
-    if (typeof e.salt !== 'string') continue;
-    checked++;
-    if (sha256Text(`${e.salt}|${e.payee || ''}|${e.memo || ''}`) !== commitOf.get(e.seq)) return { ok: false, checked: entries.filter((x) => typeof x.salt === 'string').length, brokenAt: e.seq };
+  // Every entry the app writes has a salt, so an entry members may see that arrives without one was tampered with: it fails, it is not skipped.
+  const visible = [...entries].filter((e) => !REDACTED_CATEGORIES.includes(e.category)).sort((a, b) => a.seq - b.seq);
+  for (const e of visible) {
+    if (typeof e.salt !== 'string' || sha256Text(`${e.salt}|${e.payee || ''}|${e.memo || ''}`) !== commitOf.get(e.seq)) return { ok: false, checked: visible.length, brokenAt: e.seq };
   }
-  return { ok: true, checked, brokenAt: null };
+  return { ok: true, checked: visible.length, brokenAt: null };
 }
