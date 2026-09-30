@@ -119,6 +119,23 @@ function committeeCard(raw, meta, prog, S, update) {
   };
   // The founder signs the roster of the whole committee. From then on every signer's browser can check that it is sealing to the real committee, and new
   // cards are split k-of-n. Signing comes first, so the set of early cards stops growing before they are locked.
+  // This device remembers the plan it made. If the website's numbers differ, confirming is refused (rosterToSign). When the founder really did
+  // change the plan on another device, they can say so here, but only by typing the numbers themselves, which must match what they will sign.
+  const mine = store.get(`plan.${T.campaignId}`);
+  const planConflict = () => {
+    if (!mine || (mine.k === raw.k && mine.n === raw.n)) return null;
+    const typed = (S.typedPlan ||= { k: '', n: '' });
+    return callout('danger', strong(t('The plan does not match.')), ' ',
+      t('This device remembers any {k} of {n} trustees, but the website says any {k2} of {n2}. If you did not change the plan yourself, do not confirm: tell the other trustees.', { k: mine.k, n: mine.n, k2: raw.k, n2: raw.n }),
+      p({ class: 'small' }, t('If you changed it on another device, type the numbers you chose:')),
+      div({ class: 'row' },
+        field(t('Needed together'), textInput({ type: 'number', min: 2, value: typed.k, oninput: (e) => (typed.k = e.target.value) })),
+        field(t('Trustees'), textInput({ type: 'number', min: 2, value: typed.n, oninput: (e) => (typed.n = e.target.value) })),
+        btn(t('Use this plan'), () => {
+          if (Number(typed.k) !== raw.k || Number(typed.n) !== raw.n) return toast(t('Those are not the numbers the website shows. Nothing was changed.'), 'bad');
+          store.set(`plan.${T.campaignId}`, { k: raw.k, n: raw.n }); render();
+        }, { kind: 'secondary small' })));
+  };
   const confirm = async () => {
     if (!allChecked) return toast(t('First check each trustee\'s key words with them.'), 'bad');
     const roster = rosterToSign(raw, T.campaignId, T.keys, store.get(`plan.${T.campaignId}`)); // every seat filled, the founder's own seat is the founder's own keys, and k and n are the ones this device chose
@@ -171,6 +188,7 @@ function committeeCard(raw, meta, prog, S, update) {
     complete && !confirmed && founder ? div(
       allChecked ? null : p({ class: 'small muted' }, t('First check each trustee\'s key words with them, above.')),
       p(strong(t('You are signing this: any {k} of the {n} trustees together can open the cards.', { k: raw.k, n: raw.n })), ' ', t('If that is not what you chose, do not confirm.')),
+      planConflict(),
       btn(prog.solo ? t('Confirm the committee and lock {n} early card(s)', { n: prog.solo }) : t('Confirm the committee'), act(confirm), { kind: 'primary', disabled: !allChecked })) : null,
     confirmed && status === 'ok' && prog.solo && founder ? btn(t('Lock {n} early card(s) to the committee', { n: prog.solo }), act(lockRest), { kind: 'primary' }) : null,
     confirmed && prog.solo && !founder ? p({ class: 'small muted' }, t('Only trustee 1 holds the keys to these cards, so trustee 1 does this step.')) : null,

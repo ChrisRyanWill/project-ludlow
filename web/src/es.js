@@ -791,4 +791,10 @@ export default {
   'Reversed': 'Revertida',
   // audit rows that do not match the checked log (first draft, needs a native reviewer: #10)
   'not in the checked log': 'no está en el registro comprobado',
+  // a remembered plan that differs from the website's (first draft, needs a native reviewer: #10)
+  'The plan does not match.': 'El plan no coincide.',
+  'This device remembers any {k} of {n} trustees, but the website says any {k2} of {n2}. If you did not change the plan yourself, do not confirm: tell the other trustees.': 'Este dispositivo recuerda {k} de {n} custodios, pero el sitio web dice {k2} de {n2}. Si tú no cambiaste el plan, no confirmes: avisa a los demás custodios.',
+  'If you changed it on another device, type the numbers you chose:': 'Si lo cambiaste en otro dispositivo, escribe los números que elegiste:',
+  'Use this plan': 'Usar este plan',
+  'Those are not the numbers the website shows. Nothing was changed.': 'Esos no son los números que muestra el sitio web. No se cambió nada.',
 };

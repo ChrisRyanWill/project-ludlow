@@ -296,6 +296,18 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
       await unlockDashboard(page, 1);
     }
     await page.getByText(/Everyone has joined. Now confirm the committee/).waitFor();
+    // This browser remembers the plan it made (2 of 3). If the website's numbers differ, the founder is warned and cannot sign until they type the
+    // numbers themselves (as someone who changed the plan on another device would).
+    await page.evaluate((id) => localStorage.setItem('ludlow.plan.' + id, JSON.stringify({ k: 3, n: 3 })), campaignId());
+    await unlockDashboard(page, 1);
+    await page.getByText('The plan does not match.').waitFor();
+    const planBox = page.locator('.callout', { hasText: 'The plan does not match.' });
+    await planBox.getByLabel('Needed together').fill('3'); await planBox.getByLabel('Trustees').fill('3');
+    await btn(planBox, 'Use this plan').click();
+    await page.getByText('Those are not the numbers the website shows. Nothing was changed.').waitFor();
+    await planBox.getByLabel('Needed together').fill('2');
+    await btn(planBox, 'Use this plan').click();
+    await page.getByText('The plan does not match.').waitFor({ state: 'detached' });
     // Confirming stays off until the founder has checked each trustee's key words with them. The words on the founder's screen come from the keys
     // the server holds, so they must equal what each trustee saw on their own screen.
     assert.equal(await btn(page, /Confirm the committee and lock \d+ early card/).isDisabled(), true);
