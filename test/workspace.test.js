@@ -277,9 +277,14 @@ describe('workspace: secret ballots and self-executing votes', () => {
     const q = await ws.as(5, 'POST', `/api/ws/petitions/${mk.json.petitionId}/sign`);
     assert.deepEqual([q.json.status, q.json.signers], ['qualified', 2]);
     assert.ok(q.json.openBy);
+    assert.equal(q.json.overdue, false);
+    // every member sees when the committee has let the 14 days pass
+    h.app.db.prepare('UPDATE ws_petitions SET qualified_at=? WHERE id=?').run(new Date(Date.now() - 20 * 86400_000).toISOString(), mk.json.petitionId);
+    assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions.find((x) => x.id === mk.json.petitionId).overdue, true);
     const vote = await openVote(ws, 1, { petitionId: mk.json.petitionId, title: 'A different title the committee would prefer', type: 'general', options: ['Maybe', 'Never'] });
     assert.deepEqual([vote.title, vote.options], ['Vote on Saturday shifts', ['Yes', 'No']]); // the committee cannot reword it
     assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions[0].status, 'opened');
+    assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions[0].overdue, false); // opened: no longer overdue
   });
 });
 
