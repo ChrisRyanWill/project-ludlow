@@ -56,7 +56,7 @@
 - **Key files are cached in browser storage** (encrypted under the passphrase with Argon2id). A generated passphrase is about 46 bits; a chosen one only has to be long, so it can be weak. Someone who takes a phone can try guesses offline. Use a generated passphrase.
 - **Signatures and encrypted fields.** Request signatures cover the route and the campaign or member, not the request body, so a party that can alter requests after they are signed (a TLS-terminating proxy, a hostile browser extension) could change what a signed request does. Encrypted database fields are bound to their column, not to their row, so someone who can write the database but does not have the master key could swap encrypted values between rows.
 - **A copy of the workspace database** shows, even without the master key: shifts, locations, membership status, who voted (not how), who filed grievances and which article they cited, petition signers, and session times. Names, emails, phones, addresses and job titles are encrypted, and it is readable by the server (it must send mail and print notices), so an attacker who steals both the database and `WORKSPACE_MASTER_KEY` reads it.
-- **Without `NODE_ENV=production`** (which `npm start` does not set) the master key is written next to the database. Set it, and set `WORKSPACE_MASTER_KEY`.
+- **Without `NODE_ENV=production`** (which `npm start` does not set) and without `WORKSPACE_MASTER_KEY`, a server listening only on the loopback address writes a development master key next to the database. A server listening on any other address refuses to start without `WORKSPACE_MASTER_KEY`. On a real server, set both.
 
 ### Legal deadlines and content
 

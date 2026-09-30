@@ -246,7 +246,7 @@ Keep the generated master key: without it the workspace's encrypted fields canno
 | `DATABASE_PATH` | `data/ludlow.db` | SQLite file |
 | `APP_NAME`, `APP_BASE_URL` | `Project Ludlow`, `http://localhost:PORT` | Branding; base URL used in confirmation emails |
 | `NODE_ENV` | unset | Set `production` on any real server. Without it the master key is written next to the database |
-| `WORKSPACE_MASTER_KEY` | dev key file | **Secret.** 32 bytes, base64. Required in production; back it up separately from the database |
+| `WORKSPACE_MASTER_KEY` | dev key file | **Secret.** 32 bytes, base64. Required in production and whenever `HOST` is not loopback (Cloud Log); back it up separately from the database |
 | `EMAIL_PROVIDER` | `dev` | `dev` (in-memory outbox, never persisted) or `postmark` |
 | `POSTMARK_SERVER_TOKEN` | | **Secret.** Real email |
 | `EMAIL_FROM`, `CONFIRMATION_REPLY_TO` | `noreply@localhost`, empty | Email addresses |
@@ -326,3 +326,5 @@ This work runs on a limited budget, so spend it where it counts. Suggested use, 
 
 - **Suites on the handoff tip (`24beaa5`), run one at a time:** unit 31/31, API 76/76, site 2/2, browser 15/15 (Chromium from `/opt/pw-browsers`, about 60 s). Matches the handoff.
 - **P0.1 started:** three independent read-only reviewers (roster/organizing trust; workspace governance and tally attestation; threat model and docs against the code, plus the small server changes). Their findings are verified by hand before anything is changed; results are logged below.
+- **P3.1 and P3.2 done** (`test/unit.test.js`): the conditional wrong-share assertion is unconditional; new negatives for key files (format, nonce, ciphertext, salt, opslimit, algorithm, malformed), reports (replayed under another id, absent seat), ballots (out-of-range choices, sealed to another key, duplicates documented as the server's job) and `canonicalJson`. Proof: six mutations of `shared/crypto.js`, each fails the suite; the old conditional passed the first.
+- **P1.9 master key footgun: done.** `loadMasterKey` (`server/kms.js`) now refuses to write `dev-master.key` when `HOST` is not a loopback address (`127.x`, `::1`, `localhost`); the server exits with a message naming `WORKSPACE_MASTER_KEY`. Test `master key: ...` in `test/unit.test.js` failed before the change. README, threat model and the table above updated. *Behavior change to know:* `HOST=0.0.0.0 npm start` without a key now stops at start. The Docker image is unaffected (it already sets `NODE_ENV=production`, which requires the key).

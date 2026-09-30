@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { aeadSeal, aeadOpen, randomBytes, unb64, b64, utf8, unutf8 } from '../shared/crypto.js';
 
+const isLoopback = (host) => host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(String(host));
+
 export function loadMasterKey(cfg) {
   if (cfg.masterKey) {
     const k = unb64(cfg.masterKey.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''));
@@ -13,7 +15,9 @@ export function loadMasterKey(cfg) {
     return k;
   }
   if (cfg.production) throw new Error('WORKSPACE_MASTER_KEY is required in production');
-  // Development convenience only: a key file next to the database.
+  // Development convenience only: a key file next to the database. A server other machines can reach is not
+  // development, and a key stored beside the data it protects protects nothing, so refuse rather than write one.
+  if (!isLoopback(cfg.host)) throw new Error(`WORKSPACE_MASTER_KEY is required when HOST (${cfg.host}) is reachable from other machines (generate one with: openssl rand -base64 32)`);
   const file = path.join(path.dirname(cfg.dbPath), 'dev-master.key');
   if (cfg.dbPath !== ':memory:' && fs.existsSync(file)) return unb64(fs.readFileSync(file, 'utf8').trim());
   const k = randomBytes(32);

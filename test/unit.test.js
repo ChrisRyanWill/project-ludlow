@@ -7,6 +7,9 @@ import { can, PERMS, ROLES } from '../shared/permissions.js';
 import { evaluateVote, complianceTasks } from '../shared/constants.js';
 import { makeLimiter } from '../server/rate.js';
 import { clientIp } from '../server/http.js';
+import { loadMasterKey } from '../server/kms.js';
+import { mkdtempSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { zip, crc32, csvCell, toCsv } from '../web/src/zip.js';
@@ -502,4 +505,17 @@ test('frontend trust: everything sealed for the trustees goes through the roster
       assert.ok(firstFounderLink || /\bf:/.test(m[2]), `${f}: an invitation link is built without the founder's key check: ${m[0].slice(0, 90)}`);
     }
   }
+});
+
+test('master key: the development key file is never made for a server reachable from other machines', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'ludlow-kms-'));
+  const cfg = (host, extra = {}) => ({ host, production: false, masterKey: '', dbPath: path.join(dir, host.replace(/[^a-z0-9]/gi, '_'), 'x.db'), ...extra });
+  for (const host of ['0.0.0.0', '::', '192.168.1.20', 'example.org']) {
+    assert.throws(() => loadMasterKey(cfg(host)), /WORKSPACE_MASTER_KEY/, host);
+    assert.equal(existsSync(path.join(path.dirname(cfg(host).dbPath), 'dev-master.key')), false, host);
+  }
+  for (const host of ['127.0.0.1', '127.0.0.2', '::1', 'localhost']) assert.equal(loadMasterKey(cfg(host)).length, 32, host);
+  const key = C.b64(C.randomBytes(32));
+  assert.equal(loadMasterKey(cfg('0.0.0.0', { masterKey: key })).length, 32); // a real key is fine anywhere
+  assert.throws(() => loadMasterKey(cfg('127.0.0.1', { production: true })), /required in production/);
 });
