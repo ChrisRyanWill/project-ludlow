@@ -53,8 +53,12 @@ jobs:
       - run: npm run build
       - name: Build the Docker image's build stage and compare app.js
         run: |
+          set -euo pipefail
           docker build --target build -t ludlow-build .
           local=$(sha256sum web/dist/app.js | cut -d' ' -f1)
           image=$(docker run --rm ludlow-build sha256sum web/dist/app.js | cut -d' ' -f1)
           echo "local  $local"; echo "docker $image"
+          # two empty outputs (a missing file, a failed docker run) would compare equal: require real hashes
+          [[ "$local" =~ ^[0-9a-f]{64}$ ]] || { echo "no local hash"; exit 1; }
+          [[ "$image" =~ ^[0-9a-f]{64}$ ]] || { echo "no docker hash"; exit 1; }
           test "$local" = "$image"
