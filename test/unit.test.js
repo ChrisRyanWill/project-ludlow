@@ -634,3 +634,11 @@ test('a passphrase must be long and not a pattern', () => {
     assert.equal(C.passphraseOk(bad), false, String(bad));
   }
 });
+
+test('translations: every Spanish entry belongs to an English sentence the app still uses', async () => {
+  // Translations are keyed by the English sentence, so rewording the English silently strands the Spanish. Each key must still appear in the code.
+  const es = (await import('../web/src/es.js')).default;
+  const src = ['../web/src', '../shared'].flatMap((d) => { const dir = path.resolve(import.meta.dirname, d); return readdirSync(dir).filter((f) => f.endsWith('.js') && f !== 'es.js').map((f) => readFileSync(path.join(dir, f), 'utf8')); }).join('\n');
+  const used = (k) => [k, k.replace(/'/g, "\\'"), k.replace(/"/g, '\\"')].some((v) => src.includes(v));
+  assert.deepEqual(Object.keys(es).filter((k) => !used(k)), []);
+});
