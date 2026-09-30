@@ -175,7 +175,7 @@ function committeeCard(raw, meta, prog, S, update) {
   };
   return div({ class: 'card', id: 'g-committee' }, h2(t('Your committee')),
     banner(),
-    T.keys?.boxPublicKey ? div({ class: 'keycheck' }, strong(t('Your key words')),
+    !founder && !confirmed && T.keys?.boxPublicKey ? div({ class: 'keycheck' }, strong(t('Your key words')), // only while trustee 1 still has to check them
       p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the committee is confirmed, so nobody can slip in a different key.')),
       div({ class: 'keywords', lang: 'en' }, C.keyWords(T.keys.boxPublicKey))) : null,
     ul(raw.trustees.map((x) => li(strong(nm(x.index)), x.index === T.index ? ' ' + t('(you)') : '', ' ',

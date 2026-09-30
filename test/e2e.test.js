@@ -297,10 +297,13 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
         await page.getByRole('heading', { name: 'Your committee' }).waitFor();
         await page.getByText('Trustee 1 sends this invitation.').waitFor();
         assert.equal(await btn(page, 'Get invite link').count(), 0);
+        // before the committee is confirmed, a trustee sees the key words they read to trustee 1
+        assert.equal((await page.locator('.keycheck', { hasText: 'Your key words' }).locator('.keywords').innerText()).trim(), trustee[2].words);
       }
       await unlockDashboard(page, 1);
     }
     await page.getByText(/Everyone has joined. Now confirm the committee/).waitFor();
+    assert.equal(await page.getByText('Your key words').count(), 0); // trustee 1 checks the others' words; nobody reads theirs to trustee 1
     // This browser remembers the plan it made (2 of 3). If the website's numbers differ, or this device has no plan, the founder must type the
     // numbers they chose from memory: the page does not show the website's numbers there, and confirming is refused unless they match.
     await page.evaluate((id) => localStorage.setItem('ludlow.plan.' + id, JSON.stringify({ k: 3, n: 3 })), campaignId());
@@ -343,6 +346,7 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
     // another trustee checks the roster against their own invitation: the founder's signature holds, and their own key is in it
     await unlockDashboard(page, 2);
     await page.getByText('Your key is in the roster the founder signed.').waitFor();
+    assert.equal(await page.getByText('Your key words').count(), 0); // checked and confirmed: nothing left to read aloud
     assert.deepEqual(problems, []);
   });
 
