@@ -62,7 +62,7 @@ Ledger and audit entries form hash chains: `hash_i = H(hash_{i-1} + "|" + canoni
 
 ## 4. Software fingerprint
 
-`npm run build` prints and stores `SHA-256(app.js)` in `build.json`. **Builds are designed to be reproducible**: a local build and the Docker build produced byte-identical output when last checked (this has not been re-checked since the latest security changes), so anyone can rebuild from the source and compare. The `/verify` page shows the fingerprint of the code actually running, and trustees compare it with each other and the published release before opening cards. This cannot catch a server that serves different code to different visitors; that is the main reason the server is meant to be self-hostable.
+`npm run build` prints and stores `SHA-256(app.js)` in `build.json`. **Builds are reproducible**: a CI job builds `app.js` locally and in the Docker image on every change and fails if the two differ, so anyone can rebuild from the source and compare. The `/verify` page shows the fingerprint of the code actually running, and trustees compare it with each other and the published release before opening cards. This cannot catch a server that serves different code to different visitors; that is the main reason the server is meant to be self-hostable.
 
 ## 5. Diagrams
 
