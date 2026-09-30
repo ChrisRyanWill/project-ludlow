@@ -36,16 +36,20 @@ export function makeKms(masterKey) {
       if (!dk) { dk = unwrap(wrapped); cache.set(workspaceId, dk); }
       return dk;
     },
-    // The AAD binds each ciphertext to its column, so values cannot be swapped between fields.
-    enc(dk, text, aad) {
+    // The AAD binds each ciphertext to its column AND its row ('v2'), so a value cannot be moved to another field or to another person's
+    // record: it would fail to decrypt instead of being shown as theirs. 'v1' values (column only) were written before; they are still read.
+    enc(dk, text, aad, rowId) {
       if (text == null || text === '') return null;
-      const b = aeadSeal(dk, utf8(String(text)), aad);
-      return 'v1.' + b.nonce + '.' + b.ciphertext;
+      if (!rowId) throw new Error('kms.enc needs the row id');
+      const b = aeadSeal(dk, utf8(String(text)), aad + '|' + rowId);
+      return 'v2.' + b.nonce + '.' + b.ciphertext;
     },
-    dec(dk, s, aad) {
+    dec(dk, s, aad, rowId) {
       if (!s) return '';
-      const [, nonce, ciphertext] = s.split('.');
-      return unutf8(aeadOpen(dk, { nonce, ciphertext }, aad));
+      const [v, nonce, ciphertext] = s.split('.');
+      if (v === 'v2') { if (!rowId) throw new Error('kms.dec needs the row id'); return unutf8(aeadOpen(dk, { nonce, ciphertext }, aad + '|' + rowId)); }
+      if (v === 'v1') return unutf8(aeadOpen(dk, { nonce, ciphertext }, aad));
+      throw new Error('unknown format');
     },
   };
 }

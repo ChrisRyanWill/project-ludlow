@@ -143,7 +143,7 @@ describe('workspace: founding, accounts, audit', () => {
   it('plaintext-leak test: names, emails, phones, addresses and job titles are ciphertext on disk, and no token is logged', () => {
     assert.deepEqual(h.leaks([...NEEDLES, ...ws.members.map((m) => m.token)]), []);
     const row = h.app.db.prepare('SELECT legal_name_enc, email_enc FROM ws_members LIMIT 1').get();
-    assert.match(row.legal_name_enc, /^v1\./);
+    assert.match(row.legal_name_enc, /^v2\./);
   });
 });
 
@@ -378,6 +378,34 @@ describe('workspace: one person cannot make up a result, or take power alone', (
     await tally(ws, 1, vote, [1, 3]);
     const done = (await ws.as(0, 'GET', '/api/ws/export')).json.votes.find((v) => v.id === vote.id);
     assert.equal(done.ballots.length, 1); // after the count they are part of the record
+  });
+});
+
+describe('workspace: an encrypted field belongs to its row', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, [person('Ofelia Qqqofficer', 0, { roles: ['officer'] }), person('Mona Qqqmember', 4), person('Marco Qqqmember', 5)]); });
+  after(() => h.stop());
+  const row = (i) => h.app.db.prepare('SELECT email_enc e, legal_name_enc n FROM ws_members WHERE id=?').get(ws.members[i].id);
+
+  it('swapping two members\' encrypted email or name in the database does not show one person\'s data as another\'s', async () => {
+    const [mona, marco] = [row(1), row(2)];
+    assert.match(mona.e, /^v2\./); // new values are bound to their row
+    const put = h.app.db.prepare('UPDATE ws_members SET email_enc=?, legal_name_enc=? WHERE id=?');
+    put.run(marco.e, marco.n, ws.members[1].id); put.run(mona.e, mona.n, ws.members[2].id); // someone with the database swaps them
+    const list = (await ws.as(0, 'GET', '/api/ws/roster')).json.members;
+    assert.ok(!list.some((m) => m.email === 'marco+leak@example.com' && m.id === ws.members[1].id), 'Marco\'s email shown as Mona\'s');
+    assert.ok(!list.some((m) => m.name === 'Mona Qqqmember' && m.id === ws.members[2].id), 'Mona\'s name shown as Marco\'s');
+    assert.equal(list.find((m) => m.id === ws.members[1].id).email, '[unreadable]'); // the damage shows instead
+    put.run(mona.e, mona.n, ws.members[1].id); put.run(marco.e, marco.n, ws.members[2].id);
+  });
+
+  it('values written before this change (bound to their column only) still read', async () => {
+    const dk = h.app.kms.dataKey(ws.wsId, h.app.db.prepare('SELECT data_key_wrapped w FROM ws_workspaces WHERE id=?').get(ws.wsId).w);
+    const box = C.aeadSeal(dk, C.utf8('old+leak@example.com'), 'member.email'); // how values were written before: bound to the column only
+    const old = 'v1.' + box.nonce + '.' + box.ciphertext;
+    assert.match(old, /^v1\./);
+    h.app.db.prepare('UPDATE ws_members SET email_enc=? WHERE id=?').run(old, ws.members[1].id);
+    assert.equal((await ws.as(0, 'GET', '/api/ws/roster')).json.members.find((m) => m.id === ws.members[1].id).email, 'old+leak@example.com');
   });
 });
 

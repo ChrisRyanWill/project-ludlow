@@ -29,15 +29,18 @@ const constraint = (e) => { if (String(e?.code).startsWith('SQLITE_CONSTRAINT'))
 
 export function workspaceRoutes({ router, db, cfg, kms }) {
   // ---------- field encryption (envelope, at rest) ----------
-  const enc = (dk, aad, v) => kms.enc(dk, v, aad);
-  const dec = (dk, aad, v) => kms.dec(dk, v, aad);
+  const enc = (dk, aad, v, rowId) => kms.enc(dk, v, aad, rowId);
+  // A value that does not decrypt (moved from another row or field, or damaged) shows as such, never as someone else's data and never as a crash.
+  const UNREADABLE = '[unreadable]';
+  const dec = (dk, aad, v, rowId) => { try { return kms.dec(dk, v, aad, rowId); } catch { return UNREADABLE; } };
+  const decJson = (dk, aad, v, rowId) => { const t = dec(dk, aad, v, rowId); try { return t ? JSON.parse(t) : {}; } catch { return { memo: UNREADABLE }; } };
   const person = (dk, m, full = true) => ({
-    id: m.id, name: dec(dk, 'member.legal_name', m.legal_name_enc),
-    ...(full ? { email: dec(dk, 'member.email', m.email_enc), phone: dec(dk, 'member.phone', m.phone_enc), address: dec(dk, 'member.address', m.address_enc), jobTitle: dec(dk, 'member.job_title', m.job_title_enc) } : {}),
+    id: m.id, name: dec(dk, 'member.legal_name', m.legal_name_enc, m.id),
+    ...(full ? { email: dec(dk, 'member.email', m.email_enc, m.id), phone: dec(dk, 'member.phone', m.phone_enc, m.id), address: dec(dk, 'member.address', m.address_enc, m.id), jobTitle: dec(dk, 'member.job_title', m.job_title_enc, m.id) } : {}),
     shift: m.shift, location: m.location, language: m.preferred_language, status: m.membership_status,
     founding: !!m.founding, claimed: !!m.claimed_at, joinedAt: m.joined_at,
   });
-  const nameOf = (dk, id) => { const m = id && db.prepare('SELECT legal_name_enc FROM ws_members WHERE id=?').get(id); return m ? dec(dk, 'member.legal_name', m.legal_name_enc) : null; };
+  const nameOf = (dk, id) => { const m = id && db.prepare('SELECT legal_name_enc FROM ws_members WHERE id=?').get(id); return m ? dec(dk, 'member.legal_name', m.legal_name_enc, id) : null; };
 
   // ---------- tamper-evident audit log ----------
   function audit(wsId, actorId, action, resType = null, resId = null) {
@@ -64,8 +67,8 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   function insertMember(wsId, dk, m, actorId) {
     const id = randomUUID(), t = now();
     db.prepare(`INSERT INTO ws_members (id,workspace_id,legal_name_enc,email_enc,phone_enc,address_enc,job_title_enc,shift,location,preferred_language,membership_status,founding,joined_at,claim_token_hash,created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, wsId, enc(dk, 'member.legal_name', m.legalName), enc(dk, 'member.email', m.email), enc(dk, 'member.phone', m.phone),
-      enc(dk, 'member.address', m.address), enc(dk, 'member.job_title', m.jobTitle), m.shift, m.location, m.preferredLanguage, m.status, m.founding ? 1 : 0,
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, wsId, enc(dk, 'member.legal_name', m.legalName, id), enc(dk, 'member.email', m.email, id), enc(dk, 'member.phone', m.phone, id),
+      enc(dk, 'member.address', m.address, id), enc(dk, 'member.job_title', m.jobTitle, id), m.shift, m.location, m.preferredLanguage, m.status, m.founding ? 1 : 0,
       m.status === 'member' ? t : null, m.claimTokenHash, t);
     for (const r of m.roles) db.prepare('INSERT INTO ws_roles (member_id,role,assigned_by,assigned_at) VALUES (?,?,?,?)').run(id, r, actorId, t);
     return id;
@@ -194,7 +197,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     const cur = db.prepare('SELECT shift, location, preferred_language pl FROM ws_members WHERE id=?').get(me.id);
     const keep = (sent, old, max) => (sent === undefined ? old : optStr(sent, max));
     db.prepare('UPDATE ws_members SET phone_enc=?, address_enc=?, job_title_enc=?, shift=?, location=?, preferred_language=? WHERE id=?').run(
-      enc(me.dk, 'member.phone', optStr(b.phone, 32)), enc(me.dk, 'member.address', optStr(b.address, 300)), enc(me.dk, 'member.job_title', optStr(b.jobTitle, 120)),
+      enc(me.dk, 'member.phone', optStr(b.phone, 32), me.id), enc(me.dk, 'member.address', optStr(b.address, 300), me.id), enc(me.dk, 'member.job_title', optStr(b.jobTitle, 120), me.id),
       keep(b.shift, cur.shift, 60), keep(b.location, cur.location, 60), keep(b.preferredLanguage, cur.pl, 30), me.id);
     return { saved: true };
   });
@@ -254,7 +257,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
 
   W('GET', '/api/ws/keyring', 'keyring.read', ({ me, query }) => {
     need(['chief_steward', 'steward', 'election_committee', 'officer'].includes(query.role));
-    return { holders: holders(me.wsId, query.role, true).map((m) => ({ memberId: m.id, name: dec(me.dk, 'member.legal_name', m.legal_name_enc), boxPublicKey: m.box_public_key })) };
+    return { holders: holders(me.wsId, query.role, true).map((m) => ({ memberId: m.id, name: dec(me.dk, 'member.legal_name', m.legal_name_enc, m.id), boxPublicKey: m.box_public_key })) };
   });
 
   W('POST', '/api/ws/stage', 'ws.stage.set', ({ me, body: b }) => {
@@ -749,7 +752,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     const hash = chainHash(last?.hash || GENESIS, { seq, date, kind, cents: amountCents, cat: category, rev: reversesSeq, at, commit });
     const id = randomUUID();
     db.prepare(`INSERT INTO ws_ledger (id,workspace_id,seq,entry_date,kind,amount_cents,category,payee_enc,memo_enc,commit_hash,disbursement_id,reverses_id,created_by,created_at,prev_hash,hash)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, me.wsId, seq, date, kind, amountCents, category, enc(me.dk, LEDGER_PRIVATE[0], payee), enc(me.dk, LEDGER_PRIVATE[1], JSON.stringify({ memo: memo || '', salt })),
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, me.wsId, seq, date, kind, amountCents, category, enc(me.dk, LEDGER_PRIVATE[0], payee, id), enc(me.dk, LEDGER_PRIVATE[1], JSON.stringify({ memo: memo || '', salt }), id),
       commit, disbursementId, reversesId, me.id, at, last?.hash || GENESIS, hash);
     return { id, seq, hash };
   }
@@ -773,14 +776,14 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     const seqOf = new Map(rows.map((r) => [r.id, r.seq]));
     const view = (r) => {
       const redact = REDACTED_CATEGORIES.includes(r.category);
-      const priv = r.memo_enc ? JSON.parse(dec(me.dk, LEDGER_PRIVATE[1], r.memo_enc)) : {};
-      return { id: r.id, seq: r.seq, date: r.entry_date, kind: r.kind, amountCents: r.amount_cents, category: r.category, payee: redact ? 'Member' : dec(me.dk, LEDGER_PRIVATE[0], r.payee_enc), memo: redact ? '' : priv.memo || '',
+      const priv = r.memo_enc ? decJson(me.dk, LEDGER_PRIVATE[1], r.memo_enc, r.id) : {};
+      return { id: r.id, seq: r.seq, date: r.entry_date, kind: r.kind, amountCents: r.amount_cents, category: r.category, payee: redact ? 'Member' : dec(me.dk, LEDGER_PRIVATE[0], r.payee_enc, r.id), memo: redact ? '' : priv.memo || '',
         reversesSeq: r.reverses_id ? seqOf.get(r.reverses_id) : null, reversed: reversedIds.has(r.id), createdBy: nameOf(me.dk, r.created_by), hash: r.hash };
     };
     const pending = db.prepare("SELECT * FROM ws_disbursements WHERE workspace_id=? AND status IN ('pending','approved') ORDER BY created_at").all(me.wsId).map((d) => {
       const redact = REDACTED_CATEGORIES.includes(d.category);
       const approvals = db.prepare("SELECT approver_id a FROM ws_disbursement_approvals WHERE disbursement_id=? AND decision='approve'").all(d.id);
-      return { id: d.id, amountCents: d.amount_cents, category: d.category, payee: redact ? 'Member' : dec(me.dk, 'disb.payee', d.payee_enc), memo: redact ? '' : dec(me.dk, 'disb.memo', d.memo_enc), status: d.status,
+      return { id: d.id, amountCents: d.amount_cents, category: d.category, payee: redact ? 'Member' : dec(me.dk, 'disb.payee', d.payee_enc, d.id), memo: redact ? '' : dec(me.dk, 'disb.memo', d.memo_enc, d.id), status: d.status,
         requiredApprovals: d.required_approvals, approvals: approvals.length, approvedByMe: approvals.some((a) => a.a === me.id), mine: d.requested_by === me.id, requestedBy: nameOf(me.dk, d.requested_by), createdAt: d.created_at };
     });
     const dues = db.prepare('SELECT name, amount_cents a, approved_by_vote_id v, created_at t FROM ws_dues_plans WHERE workspace_id=? ORDER BY created_at DESC').all(me.wsId);
@@ -821,7 +824,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     need(Object.hasOwn(DISBURSEMENT_CATEGORIES, b.category) && isStr(b.payee, 120));
     const cents = money(b), id = randomUUID();
     db.prepare('INSERT INTO ws_disbursements (id,workspace_id,requested_by,amount_cents,category,payee_enc,memo_enc,required_approvals,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(id, me.wsId, me.id, cents, b.category, enc(me.dk, 'disb.payee', b.payee.trim()), enc(me.dk, 'disb.memo', optStr(b.memo, 300)), disbursementNeeds(me, cents), now());
+      .run(id, me.wsId, me.id, cents, b.category, enc(me.dk, 'disb.payee', b.payee.trim(), id), enc(me.dk, 'disb.memo', optStr(b.memo, 300), id), disbursementNeeds(me, cents), now());
     audit(me.wsId, me.id, 'disbursement.requested', 'disbursement', id);
     return { id, requiredApprovals: disbursementNeeds(me, cents) };
   });
@@ -847,7 +850,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     if (d.status !== 'approved') fail(409, 'not_approved');
     let r;
     db.transaction(() => {
-      r = addLedger(me, { kind: 'disbursement', amountCents: d.amount_cents, category: d.category, payee: dec(me.dk, 'disb.payee', d.payee_enc), memo: dec(me.dk, 'disb.memo', d.memo_enc), disbursementId: d.id });
+      r = addLedger(me, { kind: 'disbursement', amountCents: d.amount_cents, category: d.category, payee: dec(me.dk, 'disb.payee', d.payee_enc, d.id), memo: dec(me.dk, 'disb.memo', d.memo_enc, d.id), disbursementId: d.id });
       db.prepare("UPDATE ws_disbursements SET status='paid', paid_ledger_id=? WHERE id=?").run(r.id, d.id);
       audit(me.wsId, me.id, 'disbursement.paid', 'disbursement', d.id);
     })();
@@ -899,8 +902,8 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
           notes: all('SELECT ciphertext, nonce, created_at at FROM ws_grievance_notes WHERE grievance_id=? ORDER BY created_at', g.id) },
       })),
       ledger: all('SELECT * FROM ws_ledger WHERE workspace_id=? ORDER BY seq', me.wsId).map((r) => {
-        const priv = r.memo_enc ? JSON.parse(dec(me.dk, LEDGER_PRIVATE[1], r.memo_enc)) : {};
-        return { seq: r.seq, date: r.entry_date, kind: r.kind, amountCents: r.amount_cents, category: r.category, payee: dec(me.dk, LEDGER_PRIVATE[0], r.payee_enc), memo: priv.memo || '', salt: priv.salt, reversesSeq: r.reverses_id ? seqOf.get(r.reverses_id) : null, at: r.created_at, prevHash: r.prev_hash, hash: r.hash, commit: r.commit_hash };
+        const priv = r.memo_enc ? decJson(me.dk, LEDGER_PRIVATE[1], r.memo_enc, r.id) : {};
+        return { seq: r.seq, date: r.entry_date, kind: r.kind, amountCents: r.amount_cents, category: r.category, payee: dec(me.dk, LEDGER_PRIVATE[0], r.payee_enc, r.id), memo: priv.memo || '', salt: priv.salt, reversesSeq: r.reverses_id ? seqOf.get(r.reverses_id) : null, at: r.created_at, prevHash: r.prev_hash, hash: r.hash, commit: r.commit_hash };
       }),
       dues: all('SELECT name, amount_cents amountCents, approved_by_vote_id voteId, created_at at FROM ws_dues_plans WHERE workspace_id=? ORDER BY created_at', me.wsId),
       audit: all('SELECT seq, actor_member_id actorId, action, resource_type type, resource_id id, created_at at, prev_hash prevHash, hash FROM ws_audit WHERE workspace_id=? ORDER BY seq', me.wsId),
