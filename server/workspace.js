@@ -32,8 +32,35 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   const enc = (dk, aad, v, rowId) => kms.enc(dk, v, aad, rowId);
   // A value that does not decrypt (moved from another row or field, or damaged) shows as such, never as someone else's data and never as a crash.
   const UNREADABLE = '[unreadable]';
-  const dec = (dk, aad, v, rowId) => { try { return kms.dec(dk, v, aad, rowId); } catch { return UNREADABLE; } };
+  // Only ledger entries may still be in the old column-only form ('v1'): they can never be rewritten. Everything else is moved to 'v2' at
+  // start-up (below), so a 'v1' value anywhere else was put there by hand, and is refused rather than shown as that person's data.
+  const V1_ALLOWED = new Set(['ledger.payee', 'ledger.memo']);
+  const dec = (dk, aad, v, rowId) => {
+    if (typeof v === 'string' && v.startsWith('v1.') && !V1_ALLOWED.has(aad)) return UNREADABLE;
+    try { return kms.dec(dk, v, aad, rowId); } catch { return UNREADABLE; }
+  };
   const decJson = (dk, aad, v, rowId) => { const t = dec(dk, aad, v, rowId); try { return t ? JSON.parse(t) : {}; } catch { return { memo: UNREADABLE }; } };
+  // Start-up migration: re-encrypt column-only ('v1') member and spending fields so they are bound to their row. Idempotent; one transaction.
+  (function bindFieldsToRows() {
+    const tables = [
+      ['ws_members', { legal_name_enc: 'member.legal_name', email_enc: 'member.email', phone_enc: 'member.phone', address_enc: 'member.address', job_title_enc: 'member.job_title' }],
+      ['ws_disbursements', { payee_enc: 'disb.payee', memo_enc: 'disb.memo' }],
+    ];
+    const keys = new Map(db.prepare('SELECT id, data_key_wrapped w FROM ws_workspaces').all().map((w) => [w.id, w.w]));
+    db.transaction(() => {
+      for (const [table, cols] of tables) {
+        const where = Object.keys(cols).map((c) => `${c} LIKE 'v1.%'`).join(' OR ');
+        for (const row of db.prepare(`SELECT * FROM ${table} WHERE ${where}`).all()) {
+          const dk = kms.dataKey(row.workspace_id, keys.get(row.workspace_id));
+          for (const [col, aad] of Object.entries(cols)) {
+            if (!row[col]?.startsWith('v1.')) continue;
+            let plain; try { plain = kms.dec(dk, row[col], aad); } catch { continue; } // unreadable already: leave it, it will show as such
+            db.prepare(`UPDATE ${table} SET ${col}=? WHERE id=?`).run(kms.enc(dk, plain, aad, row.id), row.id);
+          }
+        }
+      }
+    })();
+  })();
   const person = (dk, m, full = true) => ({
     id: m.id, name: dec(dk, 'member.legal_name', m.legal_name_enc, m.id),
     ...(full ? { email: dec(dk, 'member.email', m.email_enc, m.id), phone: dec(dk, 'member.phone', m.phone_enc, m.id), address: dec(dk, 'member.address', m.address_enc, m.id), jobTitle: dec(dk, 'member.job_title', m.job_title_enc, m.id) } : {}),

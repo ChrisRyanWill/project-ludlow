@@ -404,13 +404,23 @@ describe('workspace: an encrypted field belongs to its row', () => {
     put.run(mona.e, mona.n, ws.members[1].id); put.run(marco.e, marco.n, ws.members[2].id);
   });
 
-  it('values written before this change (bound to their column only) still read', async () => {
+  it('values written before this change are re-encrypted to their row when the server starts, and the old form is refused after that', async () => {
     const dk = h.app.kms.dataKey(ws.wsId, h.app.db.prepare('SELECT data_key_wrapped w FROM ws_workspaces WHERE id=?').get(ws.wsId).w);
-    const box = C.aeadSeal(dk, C.utf8('old+leak@example.com'), 'member.email'); // how values were written before: bound to the column only
-    const old = 'v1.' + box.nonce + '.' + box.ciphertext;
-    assert.match(old, /^v1\./);
-    h.app.db.prepare('UPDATE ws_members SET email_enc=? WHERE id=?').run(old, ws.members[1].id);
-    assert.equal((await ws.as(0, 'GET', '/api/ws/roster')).json.members.find((m) => m.id === ws.members[1].id).email, 'old+leak@example.com');
+    const v1 = (text, aad) => { const box = C.aeadSeal(dk, C.utf8(text), aad); return 'v1.' + box.nonce + '.' + box.ciphertext; }; // bound to the column only
+    h.app.db.prepare('UPDATE ws_members SET email_enc=?, legal_name_enc=? WHERE id=?').run(v1('old+leak@example.com', 'member.email'), v1('Mona Qqqmember', 'member.legal_name'), ws.members[1].id);
+    // a restart on the same database and master key
+    const again = await startApp({ dbPath: h.app.cfg.dbPath, masterKey: h.app.cfg.masterKey });
+    try {
+      const row = again.app.db.prepare('SELECT email_enc e, legal_name_enc n FROM ws_members WHERE id=?').get(ws.members[1].id);
+      assert.match(row.e, /^v2\./); assert.match(row.n, /^v2\./);
+      assert.equal(again.app.db.prepare("SELECT COUNT(*) c FROM ws_members WHERE email_enc LIKE 'v1.%' OR legal_name_enc LIKE 'v1.%' OR phone_enc LIKE 'v1.%' OR address_enc LIKE 'v1.%' OR job_title_enc LIKE 'v1.%'").get().c, 0);
+      const m = await login(again, { id: ws.members[0].id, keys: ws.members[0].keys });
+      const list = (await again.call('GET', '/api/ws/roster', { auth: m.auth })).json.members;
+      assert.equal(list.find((x) => x.id === ws.members[1].id).email, 'old+leak@example.com'); // same value, now bound to its row
+      // an old-form value pasted in afterwards is not accepted
+      again.app.db.prepare('UPDATE ws_members SET email_enc=? WHERE id=?').run(v1('someone.else@example.com', 'member.email'), ws.members[1].id);
+      assert.equal((await again.call('GET', '/api/ws/roster', { auth: m.auth })).json.members.find((x) => x.id === ws.members[1].id).email, '[unreadable]');
+    } finally { await again.stop(); }
   });
 });
 
