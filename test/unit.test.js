@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { zip, crc32, csvCell, toCsv } from '../web/src/zip.js';
-import { verifyChain, auditFields, checkPinned, cardTextMatches } from '../shared/verify.js';
+import { verifyChain, auditFields, checkPinned, cardTextMatches, auditRows } from '../shared/verify.js';
 import { authenticate, rosterToSign, checkMySeat, checkEnrollment, RosterError } from '../shared/roster.js';
 
 await C.ready;
@@ -657,4 +657,15 @@ test('mailbox counting: spellings of one inbox count as one', () => {
   assert.equal(mailboxKey('Victim@Gmail.com.'), mailboxKey('victim@gmail.com'));
   assert.equal(mailboxKey('v.i.c.t.i.m+x@googlemail.com..'), mailboxKey('victim@gmail.com'));
   assert.notEqual(mailboxKey('a.b@example.org'), mailboxKey('ab@example.org'));
+});
+
+test('the audit rows on screen are the ones that were checked: only the name comes from the page', () => {
+  const chain = [{ seq: 1, actorId: 'a', action: 'role.add:officer', type: 'member', id: 'x', at: 't1', hash: 'h1' }, { seq: 2, actorId: 'b', action: 'member.pii.read', type: 'member', id: 'y', at: 't2', hash: 'h2' }];
+  const page = [{ ...chain[1], actor: 'Bea' }, { ...chain[0], actor: 'Al' }];
+  assert.deepEqual(auditRows(page, chain).map((r) => [r.seq, r.actor, r.action, r.ok]), [[2, 'Bea', 'member.pii.read', true], [1, 'Al', 'role.add:officer', true]]);
+  const lied = [{ ...chain[1], action: 'nothing to see', actor: 'Bea' }, { ...chain[0], actorId: 'b', actor: 'Bea' }];
+  const rows = auditRows(lied, chain);
+  assert.deepEqual(rows.map((r) => [r.action, r.ok]), [['member.pii.read', true], ['role.add:officer', true]]); // what is shown comes from the checked chain...
+  assert.equal(rows[1].actor, null); // ...and a name the page attaches to a different person is not shown
+  assert.equal(auditRows([{ ...chain[0], seq: 9, hash: 'h9', actor: 'Al' }], chain)[0].ok, false); // a row the chain does not have
 });

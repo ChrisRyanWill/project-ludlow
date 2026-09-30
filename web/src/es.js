@@ -789,4 +789,6 @@ export default {
   'Reverse': 'Revertir',
   'Why is this being reversed?': '¿Por qué se revierte esto?',
   'Reversed': 'Revertida',
+  // audit rows that do not match the checked log (first draft, needs a native reviewer: #10)
+  'not in the checked log': 'no está en el registro comprobado',
 };

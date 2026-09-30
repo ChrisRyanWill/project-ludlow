@@ -49,3 +49,15 @@ export function checkCommitments(entries, chain) {
   }
   return { ok: true, checked: visible.length, brokenAt: null };
 }
+
+// The audit page lists entries with names attached; the browser checked a separate copy (the chain, without names). What is shown must be what was
+// checked, so each row is built from the chain entry with the same seq, and the page contributes only the actor's name, and only if it names the
+// same actor the chain does. A row the chain does not have is marked, not shown as checked.
+export function auditRows(entries, chain) {
+  const bySeq = new Map(chain.map((c) => [c.seq, c]));
+  return entries.map((e) => {
+    const c = bySeq.get(e.seq);
+    if (!c || c.hash !== e.hash) return { seq: e.seq, actor: null, action: e.action, at: e.at, ok: false };
+    return { seq: c.seq, actor: e.actorId === c.actorId ? e.actor ?? null : null, action: c.action, at: c.at, ok: true };
+  });
+}
