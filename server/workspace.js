@@ -383,7 +383,9 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       db.prepare(`INSERT INTO ws_votes (id,workspace_id,title,description,type,options_json,pass_rule,effect_json,petition_id,closes_at,created_by,created_at,vote_public_key,threshold_k,committee_json)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, me.wsId, spec.title, spec.description, spec.type, JSON.stringify(spec.options), spec.passRule, spec.effect ? JSON.stringify(spec.effect) : null,
         petition?.id || null, new Date(closesMs).toISOString(), me.id, now(), b.votePublicKey, b.thresholdK, JSON.stringify(b.committee.map((c) => ({ memberId: c.memberId, sealed: c.sealed }))));
-      const n = db.prepare("INSERT INTO ws_vote_participation (vote_id,member_id,has_voted) SELECT ?, id, 0 FROM ws_members WHERE workspace_id=? AND membership_status='member'").run(id, me.wsId).changes;
+      // Eligible: members whose account was claimed before the vote opened. An unclaimed account's link may be in someone else's hands (the person who
+      // made the claim links), so claiming it later must not add a voter to a vote already under way (#43). It counts from the next vote on.
+      const n = db.prepare("INSERT INTO ws_vote_participation (vote_id,member_id,has_voted) SELECT ?, id, 0 FROM ws_members WHERE workspace_id=? AND membership_status='member' AND claimed_at IS NOT NULL").run(id, me.wsId).changes;
       if (n === 0) fail(409, 'no_eligible_voters');
       if (petition) db.prepare("UPDATE ws_petitions SET status='opened', vote_id=? WHERE id=?").run(id, petition.id);
       audit(me.wsId, me.id, 'vote.created', 'vote', id);

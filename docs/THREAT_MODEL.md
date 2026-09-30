@@ -48,7 +48,7 @@
 - **What a recount proves.** A member's browser can check that the published counts match the ballots stored on the server, and that the member's own receipt is among the receipts. It cannot detect a ballot that was replaced before the key was published: receipts are random codes, not tied to a ballot. That is deliberate (a receipt that identified a ballot would let people prove how they voted to whoever pressures them), but it means the count is only as trustworthy as the server's ballot table. The server does check the ballots and receipts against the number of members who voted.
 - **Key custody.** The ballot key is generated in the browser of whoever opens the vote and is split among the committee; that browser holds the whole key at that moment. "Nobody holds the key" means it is never stored whole.
 - **Coercion.** Once the key is published, anyone who kept a copy of their own encrypted ballot, or whose device or connection was watched while voting, can show how they voted. For votes where that matters (a strike authorization, say) the committee can leave the key unpublished; the result then carries k committee signatures instead of a recount.
-- **Membership is only as good as the identity checks around it.** Whoever generates the claim links can claim any account not yet claimed, and vote as that member.
+- **Membership is only as good as the identity checks around it.** Whoever generates the claim links can claim any account not yet claimed, and vote as that member in votes opened after that (an account claimed while a vote is open is not eligible for it, and unclaimed accounts are not counted as eligible).
 
 ### Devices and keys
 

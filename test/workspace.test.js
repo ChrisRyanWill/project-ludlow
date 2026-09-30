@@ -637,6 +637,28 @@ describe('workspace: officer elections (when the feature flag is on)', () => {
   });
 });
 
+describe('workspace: an account claimed after a vote opens does not vote in it (#43)', () => {
+  let h, ws;
+  before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
+  after(() => h.stop());
+
+  it('whoever holds an unclaimed claim link cannot use it to vote in a vote that is already open', async () => {
+    // a member account that has not been claimed yet (as founding members' accounts are until they open their link)
+    const tok = C.newToken();
+    const id = (await ws.as(0, 'POST', '/api/ws/members', { members: [{ legalName: 'Unclaimed Qqqmember', claimTokenHash: C.hashToken(tok) }] })).json.memberIds[0];
+    h.app.db.prepare("UPDATE ws_members SET membership_status='member' WHERE id=?").run(id);
+    const vote = await openVote(ws, 0, { title: 'Open question', type: 'general', options: ['Yes', 'No'] });
+    assert.equal(h.app.db.prepare('SELECT COUNT(*) c FROM ws_vote_participation WHERE vote_id=? AND member_id=?').get(vote.id, id).c, 0); // not eligible, and not counted
+    const keys = C.newKeypairs();
+    assert.equal((await h.call('POST', '/api/ws/claim', { body: { workspaceId: ws.wsId, claimToken: tok, boxPublicKey: keys.boxPublicKey, signPublicKey: keys.signPublicKey } })).status, 200);
+    const m = await login(h, { id, keys });
+    const b = C.castBallot(vote.votePublicKey, 0);
+    assert.equal((await h.call('POST', `/api/ws/votes/${vote.id}/ballot`, { auth: m.auth, body: { ciphertext: b.ciphertext, receiptHash: b.receiptHash } })).status, 403);
+    const next = await openVote(ws, 0, { title: 'Next question', type: 'general', options: ['Yes', 'No'] }); // claimed now: eligible for the next vote
+    assert.equal((await h.call('POST', `/api/ws/votes/${next.id}/ballot`, { auth: m.auth, body: { ...C.castBallot(next.votePublicKey, 0), receiptCode: undefined } })).status, 200);
+  });
+});
+
 describe('workspace: money you can audit', () => {
   let h, ws;
   before(async () => { h = await startApp(); ws = await makeWorkspace(h, PEOPLE); });
