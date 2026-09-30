@@ -5,20 +5,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { aeadSeal, aeadOpen, randomBytes, unb64, b64, utf8, unutf8 } from '../shared/crypto.js';
+import { ConfigError } from './config.js';
 
-const isLoopback = (host) => host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(String(host));
+const isLoopback = (host) => String(host).toLowerCase() === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(String(host));
 
 export function loadMasterKey(cfg) {
   if (cfg.masterKey) {
     const k = unb64(cfg.masterKey.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''));
-    if (k.length !== 32) throw new Error('WORKSPACE_MASTER_KEY must be 32 bytes, base64 encoded');
+    if (k.length !== 32) throw new ConfigError('WORKSPACE_MASTER_KEY must be 32 bytes, base64 encoded (generate one with: openssl rand -base64 32)');
     return k;
   }
-  if (cfg.production) throw new Error('WORKSPACE_MASTER_KEY is required in production');
+  if (cfg.production) throw new ConfigError('WORKSPACE_MASTER_KEY is required in production (generate one with: openssl rand -base64 32, and keep it apart from the backups)');
   // Development convenience only: a key file next to the database. A server other machines can reach is not
   // development, and a key stored beside the data it protects protects nothing, so refuse rather than write one.
-  if (!isLoopback(cfg.host)) throw new Error(`WORKSPACE_MASTER_KEY is required when HOST (${cfg.host}) is reachable from other machines (generate one with: openssl rand -base64 32)`);
   const file = path.join(path.dirname(cfg.dbPath), 'dev-master.key');
+  if (!isLoopback(cfg.host)) {
+    throw new ConfigError(`WORKSPACE_MASTER_KEY is required when HOST (${cfg.host}) is reachable from other machines. ` +
+      `If this database already holds data made in development, start with the key it was written with: WORKSPACE_MASTER_KEY="$(cat ${file})". ` +
+      'For a new server, generate one: openssl rand -base64 32. See docs/DEPLOY.md.');
+  }
   if (cfg.dbPath !== ':memory:' && fs.existsSync(file)) return unb64(fs.readFileSync(file, 'utf8').trim());
   const k = randomBytes(32);
   if (cfg.dbPath !== ':memory:') { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, b64(k), { mode: 0o600 }); }

@@ -64,6 +64,9 @@ describe('campaign: zero-knowledge authorization cards', () => {
   it('sends the Confirmation Transmission with every field GC 15-08 requires, and stores none of it', async () => {
     const r = await confirm(h, camp, A);
     assert.equal(r.status, 200);
+    // the development outbox holds that email: served to a browser on this machine only, not to one a proxy passes on
+    assert.equal((await fetch(h.base + '/dev/outbox')).status, 200);
+    assert.equal((await fetch(h.base + '/dev/outbox', { headers: { 'x-forwarded-for': '203.0.113.9' } })).status, 404);
     const mail = h.app.mail.outbox.at(-1);
     for (const s of [NAMES.a, 'leaktest+a@example.com', '+15550199991', 'Leakcheck Industries LLC', 'Leakcheck Workers United', 'I authorize the union to represent me.', 'UTC', '/d#t=' + A.disavowToken]) assert.ok(mail.text.includes(s), 'email lacks: ' + s);
     assert.match(mail.subject, /Confirmation/);

@@ -6,14 +6,15 @@ import * as D from '../shared/deadlines.js';
 import { can, PERMS, ROLES } from '../shared/permissions.js';
 import { evaluateVote, complianceTasks } from '../shared/constants.js';
 import { makeLimiter } from '../server/rate.js';
-import { clientIp } from '../server/http.js';
+import { clientIp, fromThisMachine } from '../server/http.js';
 import { loadMasterKey } from '../server/kms.js';
 import { mailboxKey } from '../server/campaign.js';
 import { organizeStep, workspaceStep } from '../shared/guide.js';
 import { loadConfig } from '../server/config.js';
 import { openDb } from '../server/db.js';
 import Database from 'better-sqlite3';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -599,10 +600,38 @@ test('master key: the development key file is never made for a server reachable 
     assert.throws(() => loadMasterKey(cfg(host)), /WORKSPACE_MASTER_KEY/, host);
     assert.equal(existsSync(path.join(path.dirname(cfg(host).dbPath), 'dev-master.key')), false, host);
   }
-  for (const host of ['127.0.0.1', '127.0.0.2', '::1', 'localhost']) assert.equal(loadMasterKey(cfg(host)).length, 32, host);
+  for (const host of ['127.0.0.1', '127.0.0.2', '::1', 'localhost', 'LOCALHOST', 'LocalHost']) assert.equal(loadMasterKey(cfg(host)).length, 32, host);
   const key = C.b64(C.randomBytes(32));
   assert.equal(loadMasterKey(cfg('0.0.0.0', { masterKey: key })).length, 32); // a real key is fine anywhere
   assert.throws(() => loadMasterKey(cfg('127.0.0.1', { production: true })), /required in production/);
+});
+
+test('start-up without a master key on a reachable address: one clean line naming both ways out, not a stack trace', () => {
+  const run = (dir) => spawnSync(process.execPath, ['server/index.js'], { encoding: 'utf8', timeout: 20000,
+    env: { PATH: process.env.PATH, HOST: '0.0.0.0', PORT: '0', DATABASE_PATH: path.join(dir, 'ludlow.db'), NODE_ENV: 'development' } });
+  const fresh = mkdtempSync(path.join(tmpdir(), 'ludlow-start-'));
+  const r = run(fresh);
+  assert.equal(r.status, 1);
+  const lines = r.stderr.trim().split('\n');
+  assert.equal(lines.length, 1, r.stderr);
+  assert.doesNotMatch(r.stderr, /\n\s+at |Error:/);
+  assert.match(lines[0], /WORKSPACE_MASTER_KEY/); assert.match(lines[0], /openssl rand -base64 32/);
+  assert.match(lines[0], /WORKSPACE_MASTER_KEY="\$\(cat .*dev-master\.key\)"/); // the other case: keep the key the development data was written with
+  assert.equal(existsSync(path.join(fresh, 'dev-master.key')), false);
+  const dev = mkdtempSync(path.join(tmpdir(), 'ludlow-start-'));
+  writeFileSync(path.join(dev, 'dev-master.key'), C.b64(C.randomBytes(32)));
+  const r2 = run(dev);
+  assert.equal(r2.status, 1); assert.equal(r2.stderr.trim().split('\n').length, 1);
+  assert.match(r2.stderr, new RegExp('cat ' + path.join(dev, 'dev-master.key').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))); // names this server's own key file
+});
+
+test('the development outbox is served only to a browser on this machine, never through a proxy', () => {
+  const req = (remoteAddress, headers = {}) => ({ socket: { remoteAddress }, headers });
+  for (const a of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) assert.equal(fromThisMachine(req(a)), true, a);
+  for (const a of ['10.0.0.5', '192.168.1.2', '::ffff:10.0.0.5', undefined]) assert.equal(fromThisMachine(req(a)), false, String(a));
+  assert.equal(fromThisMachine(req('127.0.0.1', { 'x-forwarded-for': '203.0.113.9' })), false); // a proxy on this machine passing on someone else
+  assert.equal(fromThisMachine(req('127.0.0.1', { forwarded: 'for=203.0.113.9' })), false);
+  assert.equal(fromThisMachine(req('127.0.0.1', { 'x-real-ip': '203.0.113.9' })), false);
 });
 
 test('the database never runs in WAL mode, where one commit would put a voter\'s "has voted" next to their ballot', () => {

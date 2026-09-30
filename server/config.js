@@ -1,12 +1,15 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// A setting the operator must fix. The server prints the message alone, without a stack trace.
+export class ConfigError extends Error { constructor(msg) { super(msg); this.name = 'ConfigError'; } }
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // A typo here silently changes whose address the rate limits count, so anything but a whole number stops the server.
 function trustProxy(v) {
   if (v == null || v === '') return 0;
-  if (!/^\d{1,2}$/.test(String(v).trim())) throw new Error(`TRUST_PROXY must be the number of reverse proxies in front of the server (0, 1, 2...), not "${String(v).slice(0, 20)}"`);
+  if (!/^\d{1,2}$/.test(String(v).trim())) throw new ConfigError(`TRUST_PROXY must be the number of reverse proxies in front of the server (0, 1, 2...), not "${String(v).slice(0, 20)}"`);
   return Number(v);
 }
 

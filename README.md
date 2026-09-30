@@ -29,7 +29,7 @@ npm start          # builds the web app, serves http://localhost:8787   (Node 20
 npm test           # unit + API tests, and a real-Chromium run through the whole product
 ```
 
-Data lives in `./data/ludlow.db` (one SQLite file). In development the confirmation emails go to an in-memory outbox at `/dev/outbox`. You can also try the core idea, sealing a card among trustees, on the [live page](https://chrisryanwill.github.io/project-ludlow/#try) without installing anything.
+Data lives in `./data/ludlow.db` (one SQLite file). In development the confirmation emails go to an in-memory outbox at `/dev/outbox`, which is served only to a browser on the same computer. You can also try the core idea, sealing a card among trustees, on the [live page](https://chrisryanwill.github.io/project-ludlow/#try) without installing anything.
 
 **A five-minute walkthrough** (use a phone-sized window; open links in private windows to play different people):
 1. `Start a campaign`, pick the release number (try 3 people), and make your key. **You can invite people right away; nobody else has to join first.**
@@ -88,7 +88,7 @@ The original build specifications are in [`docs/spec/`](docs/spec/) and double a
 - **Read the [threat model](docs/THREAT_MODEL.md) first.** An [internal, AI-assisted security review](docs/reviews/2026-09-internal-review-1.md) found and fixed real problems and wrote down design-level limits (the biggest, a server that lies about which keys belong to whom, is now closed for cards and reports and still open for the workspace's grievance and vote keys). It is not an independent audit.
 - **Have a labor attorney review everything in `content/legal/`.** Every `TODO(lawyer)` / `TODO(accountant)` is a real open question.
 - Get an independent security review of `shared/crypto.js`, `server/`, and the deployment. Read the threat model first.
-- Set `WORKSPACE_MASTER_KEY` and back it up. Set `EMAIL_PROVIDER=postmark` (tracking is disabled in code) and a monitored `CONFIRMATION_REPLY_TO` inbox. Run behind HTTPS with `TRUST_PROXY=1` (the number of reverse proxies in front, 1 for Caddy or nginx), and set `NODE_ENV=production` (`npm start` does not; without it and without `WORKSPACE_MASTER_KEY`, a server listening only on this machine writes a development master key next to the database, and one listening on any other address refuses to start). Run **one** instance (challenges and rate limits are in memory).
+- Set `WORKSPACE_MASTER_KEY` and back it up. Set `EMAIL_PROVIDER=postmark` (tracking is disabled in code) and a monitored `CONFIRMATION_REPLY_TO` inbox. Run behind HTTPS with `TRUST_PROXY=1` (the number of reverse proxies in front, 1 for Caddy or nginx), and set `NODE_ENV=production` (`npm start` does not; without it and without `WORKSPACE_MASTER_KEY`, a server listening only on this machine writes a development master key next to the database, and one listening on any other address refuses to start, with one line saying what to set). To move a database made in development to a server, start it with the key it was written with, `WORKSPACE_MASTER_KEY="$(cat data/dev-master.key)"`; otherwise its encrypted fields cannot be read. Run **one** instance (challenges and rate limits are in memory).
 - The Spanish translation is a first draft and needs a native, legally aware review (#10). It covers the whole interface and the US card text; the other legal pages (rights, safety tips, data protection, letters) are still English only.
 
 ## Not built yet
@@ -114,7 +114,7 @@ Project Ludlow is free software, licensed under the **GNU Affero General Public 
 | `PORT`, `HOST` | `8787`, `127.0.0.1` | Listen address (`HOST=0.0.0.0` in containers) |
 | `DATABASE_PATH` | `data/ludlow.db` | SQLite file |
 | `APP_BASE_URL` | `http://localhost:PORT` | Used in confirmation emails |
-| `WORKSPACE_MASTER_KEY` | dev key file | 32 bytes, base64. **Required in production** and whenever `HOST` is not a loopback address. |
+| `WORKSPACE_MASTER_KEY` | dev key file | 32 bytes, base64. **Required in production** and whenever `HOST` is not a loopback address (`localhost` in any case, `127.x.x.x`, `::1`). |
 | `EMAIL_PROVIDER` | `dev` | `dev` (in-memory outbox) or `postmark` |
 | `POSTMARK_SERVER_TOKEN`, `EMAIL_FROM`, `CONFIRMATION_REPLY_TO` | | Real email |
 | `CAMPAIGN_INACTIVITY_DAYS` | `180` | Idle campaigns are hard-deleted |

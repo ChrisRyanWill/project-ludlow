@@ -120,6 +120,11 @@ export function clientIp(req, cfg) {
   return req.socket.remoteAddress || 'unknown';
 }
 
+// A request made on this machine directly, not passed on by a proxy (which would connect from this machine too). Used only for development pages.
+const LOOPBACK = /^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|::ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3})$/;
+export const fromThisMachine = (req) => LOOPBACK.test(String(req.socket?.remoteAddress || ''))
+  && !req.headers['x-forwarded-for'] && !req.headers.forwarded && !req.headers['x-real-ip'];
+
 export function createHttpServer({ router, cfg, limiter }) {
   return http.createServer(async (req, res) => {
     const t0 = performance.now();

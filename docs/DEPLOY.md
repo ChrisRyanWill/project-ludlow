@@ -27,7 +27,8 @@ openssl rand -base64 32
 
 - **Store it in a password manager** or secret store, and **separately from database backups**. A backup and the key together reveal members' names and contact details; either alone does not.
 - **If it is lost, the workspace's encrypted fields cannot be read again.** There is no recovery.
-- The server refuses to start without it when `NODE_ENV=production`, or when it listens on any address other than this machine.
+- The server refuses to start without it when `NODE_ENV=production`, or when it listens on any address other than this machine. It then prints one line saying what to set.
+- **Moving a database you started in development?** Its fields were encrypted with the development key in `data/dev-master.key`. Start the server with that key, `WORKSPACE_MASTER_KEY="$(cat data/dev-master.key)"`, and store it as above. A new key cannot read that data.
 
 ## 4. Run it with Docker
 
@@ -98,7 +99,7 @@ git pull && docker build -t project-ludlow . && docker stop ludlow && docker rm 
 # then the same docker run command as in step 4
 ```
 
-- **Migrations:** schema changes for existing databases run automatically at start. Back up first.
+- **Migrations:** schema changes for existing databases run automatically at start. **Back up first: they are one-way.** For example, the first start of a version that binds each encrypted field to its row re-encrypts those fields once, and an older version cannot read them afterwards. To go back to an older version, restore the backup you made before updating (section 7).
 - **After updating,** check `/verify` again and tell the trustees the new fingerprint, so they can compare it before opening cards.
 
 ## 9. Keep in mind

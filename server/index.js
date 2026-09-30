@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import { loadConfig } from './config.js';
+import { loadConfig, ConfigError } from './config.js';
 import { openDb } from './db.js';
 import { Router, createHttpServer } from './http.js';
 import { makeLimiter } from './rate.js';
@@ -35,7 +35,12 @@ export async function createApp(overrides = {}) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const app = await createApp();
+  let app;
+  try { app = await createApp(); } catch (e) {
+    if (!(e instanceof ConfigError)) throw e;
+    process.stderr.write(e.message + '\n'); // a setting to fix, not a bug: the message alone
+    process.exit(1);
+  }
   const port = await app.listen();
   logInfo(`${app.cfg.appName} is listening on port ${port}`);
 }

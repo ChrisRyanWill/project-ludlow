@@ -1,7 +1,7 @@
 // Campaign API: zero-knowledge authorization cards. The server stores ciphertext, hashes of bearer
 // tokens, public keys and counts. It never receives a key that opens a card or the campaign metadata.
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { fail } from './http.js';
+import { fail, fromThisMachine } from './http.js';
 import { hashToken, vouchHash, verifyAuth, verifyRoster, canonicalJson, bodyHash } from '../shared/crypto.js';
 import { issueChallenge, takeChallenge, bearer, sigHeader } from './auth.js';
 import { confirmationEmail } from './mail.js';
@@ -569,5 +569,6 @@ export function campaignRoutes({ router, db, cfg, mail }) {
   });
 
   // Development only: an in-memory outbox so you can read the Confirmation Transmission without email.
-  if (mail.outbox && !cfg.production) R('GET', '/dev/outbox', {}, () => ({ messages: mail.outbox }));
+  // Only to a browser on this machine: on a server others can reach, the messages hold signers' names and addresses.
+  if (mail.outbox && !cfg.production) R('GET', '/dev/outbox', {}, ({ req }) => { if (!fromThisMachine(req)) fail(404, 'not_found'); return { messages: mail.outbox }; });
 }
