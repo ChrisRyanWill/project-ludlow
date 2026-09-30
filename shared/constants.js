@@ -13,6 +13,11 @@ export const POLICY_FIELDS = {
   termMonths: { label: 'Officer term length (months)', min: 6, max: 36, def: 24 },
 };
 export const DEFAULT_POLICY = Object.fromEntries(Object.entries(POLICY_FIELDS).map(([k, v]) => [k, v.def]));
+// Votes where an employer or a faction could pressure members to prove how they voted. Once the ballot key is published, anyone who kept a copy of
+// their own encrypted ballot can prove it, so the counting page does not start with publishing ticked for these (docs/research/ballot-secrecy.md).
+export const COERCION_RISK_TYPES = ['strike_authorization', 'ratification'];
+// A decision with an effect (dues, rules, removal) is always published so anyone can recount it.
+export const publishByDefault = ({ type, hasEffect }) => !!hasEffect || !COERCION_RISK_TYPES.includes(type);
 export const PASS_RULES = ['majority', 'two_thirds', 'plurality'];
 export const GRIEVANCE_DECISIONS = ['pursue', 'resolved_informally', 'not_pursued'];
 // A grievance's contract reference is stored in the clear, so it must stay a reference, never a narrative:

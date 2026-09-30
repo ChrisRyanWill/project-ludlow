@@ -4,7 +4,7 @@ import * as C from '../shared/crypto.js';
 import { WORDS } from '../shared/words.js';
 import * as D from '../shared/deadlines.js';
 import { can, PERMS, ROLES } from '../shared/permissions.js';
-import { evaluateVote, complianceTasks } from '../shared/constants.js';
+import { evaluateVote, complianceTasks, publishByDefault } from '../shared/constants.js';
 import { makeLimiter } from '../server/rate.js';
 import { clientIp, fromThisMachine } from '../server/http.js';
 import { loadMasterKey } from '../server/kms.js';
@@ -632,6 +632,14 @@ test('the development outbox is served only to a browser on this machine, never 
   assert.equal(fromThisMachine(req('127.0.0.1', { 'x-forwarded-for': '203.0.113.9' })), false); // a proxy on this machine passing on someone else
   assert.equal(fromThisMachine(req('127.0.0.1', { forwarded: 'for=203.0.113.9' })), false);
   assert.equal(fromThisMachine(req('127.0.0.1', { 'x-real-ip': '203.0.113.9' })), false);
+});
+
+test('the counting page does not suggest publishing the ballot key for votes where members could be pressured to prove their vote', () => {
+  for (const type of ['strike_authorization', 'ratification']) assert.equal(publishByDefault({ type, hasEffect: false }), false, type);
+  for (const type of ['general', 'officer_election']) assert.equal(publishByDefault({ type, hasEffect: false }), true, type);
+  for (const type of ['dues_change', 'bylaws_amendment', 'recall']) assert.equal(publishByDefault({ type, hasEffect: true }), true, type); // a decision with an effect is always recounted
+  const votes = readFileSync(new URL('../web/src/ws-votes.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(votes, /afterward any member can recount/); // not true when the committee keeps the key back
 });
 
 test('the database never runs in WAL mode, where one commit would put a voter\'s "has voted" next to their ballot', () => {

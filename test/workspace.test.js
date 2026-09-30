@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as C from '../shared/crypto.js';
+import { publishByDefault } from '../shared/constants.js';
 import * as D from '../shared/deadlines.js';
 import { verifyChain, ledgerFields, auditFields, checkPinned, checkCommitments } from '../shared/verify.js';
 import { can, ROLES } from '../shared/permissions.js';
@@ -300,6 +301,8 @@ describe('workspace: one person cannot make up a result, or take power alone', (
     for (const i of [0, 1, 2, 4]) await cast(ws, i, vote, 0);
     await cast(ws, 5, vote, 1);
     endVote(ws, vote.id);
+    const bundle = (await ws.as(1, 'GET', `/api/ws/votes/${vote.id}/tally-bundle`)).json;
+    assert.equal(bundle.type, 'strike_authorization'); assert.equal(publishByDefault(bundle), false); // the counting page starts with the key kept back
     const short = (r) => { assert.equal(r.status, 403); assert.equal(r.json.error, 'not_enough_committee'); };
     short(await post(1, vote, { counts: [5, 0] })); // one committee member posting whatever they like
     short(await post(1, vote, { counts: [5, 0], attestations: attest(vote, [5, 0], [1]) })); // ...even signing it themselves

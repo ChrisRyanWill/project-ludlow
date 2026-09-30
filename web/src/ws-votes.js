@@ -1,6 +1,6 @@
-// Votes: secret ballots the committee counts in the browser, that any member can recount and check.
+// Votes: secret ballots the committee counts in the browser. When the committee publishes the ballot key, any member can recount and check.
 import * as C from '../../shared/crypto.js';
-import { POLICY_FIELDS, evaluateVote } from '../../shared/constants.js';
+import { POLICY_FIELDS, evaluateVote, publishByDefault, COERCION_RISK_TYPES } from '../../shared/constants.js';
 import { store } from './store.js';
 import { t } from './i18n.js';
 import { keyFilePicker, label3 } from './organize.js';
@@ -75,7 +75,7 @@ export async function VotesTab() {
   const status = (v) => (v.status === 'open' ? badge(t('Open'), 'ok') : v.status === 'closed' ? badge(t('Counting'), 'warn') : badge(v.results?.passed ? t('Passed') : t('Did not pass'), v.results?.passed ? 'ok' : ''));
   return wsFrame('votes', view((update) => div(
     h1(t('Votes')),
-    p({ class: 'muted' }, t('Every vote is a secret ballot. The committee counts in a browser, and afterward any member can recount.')),
+    p({ class: 'muted' }, t('Every vote is a secret ballot. The committee counts in a browser. When it publishes the ballot key, which it must for dues, rules and removal votes, any member can recount too.')),
     div({ class: 'row' }, can('vote.create') ? btn(t('Start a vote'), () => { S.form = 'vote'; update(); }, { kind: 'primary' }) : null, can('petition.create') ? btn(t('Start a petition'), () => { S.form = 'petition'; update(); }, { kind: 'secondary' }) : null),
     S.form ? voteForm({ mode: S.form, roles, onDone: () => { S.form = null; render(); } }) : null,
     votes.length ? votes.map((v) => div({ class: 'card' }, div({ class: 'row between' }, h3(a({ href: `/w/votes/${v.id}` }, v.title)), status(v)),
@@ -169,7 +169,8 @@ export async function TallyPage({ id }) {
   setTitle('Count the ballots', true);
   await C.ready;
   const b = await wcall('GET', `/api/ws/votes/${id}/tally-bundle`);
-  const S = { shares: [], who: [], signers: [], counts: null, sk: null, publish: true };
+  const S = { shares: [], who: [], signers: [], counts: null, sk: null, publish: publishByDefault(b) };
+  const risky = !b.hasEffect && COERCION_RISK_TYPES.includes(b.type);
   const mine = b.committee.find((c) => c.memberId === WS.memberId);
   if (mine) { S.shares.push(C.boxOpen(mine.sealed, WS.keys.boxPublicKey, WS.keys.boxSecretKey)); S.who.push(WS.memberId); S.signers.push({ memberId: WS.memberId, key: WS.keys.signSecretKey }); }
   return wsFrame('votes', view((update) => {
@@ -193,9 +194,13 @@ export async function TallyPage({ id }) {
         p(ev.passed ? strong(t('This passes.')) : strong(t('This does not pass.'))),
         b.hasEffect
           ? p({ class: 'small' }, strong(t('The ballot key will be published.')), ' ', t('This decision changes the dues, the rules or who holds a role, so anyone must be able to recount it.'))
-          : label3(t('Publish the ballot key so every member can recount (recommended)'), S.publish, (v) => { S.publish = v; update(); }),
+          : risky ? div(
+            callout('danger', strong(t('Publishing the key lets members be pressured to prove their vote.')), ' ',
+              t('Once the ballot key is published, anyone who kept a copy of their own encrypted ballot can prove how they voted, to the employer or to anyone else who demands it. For a strike or contract vote, the safer choice is usually to keep the key back: the committee members who counted sign the numbers instead, and nobody can recount.')),
+            label3(t('Publish the ballot key anyway, so every member can recount'), S.publish, (v) => { S.publish = v; update(); }))
+            : label3(t('Publish the ballot key so every member can recount (recommended)'), S.publish, (v) => { S.publish = v; update(); }),
         p({ class: 'small muted' }, t('Ballots are not linked to voters, so publishing the key shows how many chose what, not who. It lets any member check the count.'), ' ',
-          t('But once it is published, anyone who kept a copy of their own encrypted ballot can prove how they voted. If members could be pressured to show their vote (a strike or a contract vote, say), think about that before publishing.')),
+          risky ? '' : t('But once it is published, anyone who kept a copy of their own encrypted ballot can prove how they voted. If members could be pressured to show their vote (a strike or a contract vote, say), think about that before publishing.')),
         !b.hasEffect && !S.publish ? p({ class: 'small muted' }, t('Without the key nobody can recount. Each of the {k} committee members who counted signs these numbers, and the server accepts them only with all {k} signatures.', { k: b.thresholdK })) : null,
         btn(t('Publish the results'), act(async () => {
           const body = { counts: S.counts.counts };

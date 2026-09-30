@@ -480,7 +480,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     if (!JSON.parse(v.committee_json).some((c) => c.memberId === me.id)) fail(403, 'forbidden');
     if (v.status === 'open') fail(409, 'vote_open');
     return {
-      votePublicKey: v.vote_public_key, options: optionsOf(me, v), passRule: v.pass_rule, thresholdK: v.threshold_k, committee: JSON.parse(v.committee_json), status: v.status,
+      votePublicKey: v.vote_public_key, type: v.type, options: optionsOf(me, v), passRule: v.pass_rule, thresholdK: v.threshold_k, committee: JSON.parse(v.committee_json), status: v.status,
       hasEffect: !!v.effect_json, // such a decision must be counted in the open: the ballot key has to be published so anyone can recount
       ballots: db.prepare('SELECT choice_ciphertext c FROM ws_ballots WHERE vote_id=? ORDER BY id').all(v.id).map((r) => r.c),
     };
