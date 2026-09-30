@@ -463,8 +463,8 @@ describe('workspace: smaller fixes from the review', () => {
       return { id, ...C.sealJson(k, { what: 'Zyxwvut concern' }, 'grievance|' + id), ...(articleRef === undefined ? {} : { articleRef }),
         sealedKeys: { [ws.members[2].id]: C.boxSeal(ws.members[2].keys.boxPublicKey, k), [ws.members[0].id]: C.boxSeal(ws.members[0].keys.boxPublicKey, k) } };
     };
-    for (const bad of ['supervisor J. Doe told me to sign off on it', 'Art. 12; call him', '<script>', 'x'.repeat(21)]) assert.equal((await ws.as(2, 'POST', '/api/ws/grievances', file(bad))).json.error, 'bad_article', bad);
-    for (const good of ['Art. 12', 'Article 3.2', '§ 4', undefined, '']) assert.equal((await ws.as(2, 'POST', '/api/ws/grievances', file(good))).status, 200, String(good));
+    for (const bad of ['supervisor J. Doe told me to sign off on it', 'Art. 12; call him', '<script>', 'x'.repeat(21), 'Art. 5\n(b)', 'Art. 5 [b]', 'a@b.c']) assert.equal((await ws.as(2, 'POST', '/api/ws/grievances', file(bad))).json.error, 'bad_article', bad);
+    for (const good of ['Art. 12', 'Article 3.2', '§ 4', 'Art. 5(b)', '12/3', 'Art. 7, 9', 'Art. IV', undefined, '']) assert.equal((await ws.as(2, 'POST', '/api/ws/grievances', file(good))).status, 200, String(good));
     assert.equal(h.app.db.prepare("SELECT COUNT(*) c FROM ws_grievances WHERE article_ref LIKE '%supervisor%'").get().c, 0);
   });
 

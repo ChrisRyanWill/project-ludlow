@@ -15,6 +15,9 @@ export const POLICY_FIELDS = {
 export const DEFAULT_POLICY = Object.fromEntries(Object.entries(POLICY_FIELDS).map(([k, v]) => [k, v.def]));
 export const PASS_RULES = ['majority', 'two_thirds', 'plurality'];
 export const GRIEVANCE_DECISIONS = ['pursue', 'resolved_informally', 'not_pursued'];
+// A grievance's contract reference is stored in the clear, so it must stay a reference, never a narrative:
+// short, and only the characters article numbers use ("Art. 12", "§ 4", "Art. 5(b)", "12/3", "Art. 7, 9").
+export const ARTICLE_REF = /^[A-Za-z0-9 .,§()\/-]{1,20}$/;
 export const SMALL_GROUP = 5; // breakdowns with fewer people than this are hidden
 
 // TODO(accountant): align these with the Department of Labor LM-2/LM-3 line items before real use.

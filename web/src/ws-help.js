@@ -3,7 +3,7 @@
 import * as C from '../../shared/crypto.js';
 import { ApiError } from './api.js';
 import { t } from './i18n.js';
-import { GRIEVANCE_DECISIONS } from '../../shared/constants.js';
+import { GRIEVANCE_DECISIONS, ARTICLE_REF } from '../../shared/constants.js';
 import { WS, wcall, can, has, wsInfo, wsFrame, pack, urgencyBadge } from './wsbase.js';
 import {
   div, span, p, a, ul, li, h1, h2, h3, strong, input, textarea, details, summary, btn, callout, badge, field, textInput, selectBox,
@@ -31,7 +31,7 @@ export async function HelpTab() {
       field(t('What would fix it?'), textInput({ oninput: (e) => (F.desired = e.target.value) })),
       btn(t('Send it, encrypted'), act(async () => {
         if (F.what.trim().length < 5) return toast(t('Please describe what happened.'), 'bad');
-        if (F.article.trim() && !/^[A-Za-z0-9 .§-]{1,20}$/.test(F.article.trim())) return toast(t('Put only the article number there, such as "Art. 12". Everything else belongs in the description, which is encrypted.'), 'bad');
+        if (F.article.trim() && !ARTICLE_REF.test(F.article.trim())) return toast(t('Put only the article number there, such as "Art. 12". Everything else belongs in the description, which is encrypted.'), 'bad');
         const ring = await wcall('GET', '/api/ws/keyring?role=chief_steward');
         if (!ring.holders.length) throw new ApiError(409, 'no_chief_steward');
         const id = C.uuid(), key = C.randomBytes(32);

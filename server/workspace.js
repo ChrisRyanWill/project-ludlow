@@ -10,6 +10,7 @@ import { PERMS, can, ASSIGNABLE_ROLES } from '../shared/permissions.js';
 import {
   STAGES, VOTE_TYPES, PASS_RULES, GRIEVANCE_DECISIONS, SMALL_GROUP, RECEIPT_CATEGORIES, DISBURSEMENT_CATEGORIES,
   REDACTED_CATEGORIES, DEFAULT_PROCEDURE, DEFAULT_POLICY, POLICY_FIELDS, evaluateVote, complianceTasks,
+  ARTICLE_REF,
 } from '../shared/constants.js';
 import { dueDate, todayIn, urgency, addCalendar } from '../shared/deadlines.js';
 
@@ -599,7 +600,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   }
   // The contract article is kept in the clear so the case list can show it, so it may only be a short reference like "Art. 12" (the words of the
   // concern are what is encrypted). A longer entry is refused instead of quietly storing, say, a supervisor's name in plaintext.
-  const articleRef = (v) => (v == null || v === '' ? null : typeof v === 'string' && /^[A-Za-z0-9 .§-]{1,20}$/.test(v.trim()) ? v.trim() : fail(400, 'bad_article'));
+  const articleRef = (v) => (v == null || v === '' ? null : typeof v === 'string' && ARTICLE_REF.test(v.trim()) ? v.trim() : fail(400, 'bad_article'));
   W('POST', '/api/ws/grievances', 'grievance.submit', ({ me, body: b }) => {
     need(isUuid(b.id) && isB64(b.ciphertext, 16, 60000) && isB64(b.nonce, 32, 32) && b.sealedKeys && typeof b.sealedKeys === 'object');
     const chiefs = holders(me.wsId, 'chief_steward', true);
