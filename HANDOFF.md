@@ -315,3 +315,14 @@ This work runs on a limited budget, so spend it where it counts. Suggested use, 
 ## 8. Glossary
 
 **Founder** = trustee 1, who can start alone. **Trustee** = holds a key share; k of n open the cards. **Solo card** = sealed to the founder alone. **Roster** = the committee (`{campaignId, k, n, seats}`) signed by the founder. **Founder key check (`f`)** = 128-bit hash of the founder's public keys carried in every invitation link. **Key words** = 10 words identifying a public key, read aloud to check it. **Release number** = how many vouched cards must exist before the server hands over ciphertext. **Effect vote** = a vote whose decision the server carries out (dues, bylaws, recall, officer election). **Vouched** = a card counted (direct invite, or confirmed in person for group links). **Small-group suppression** = breakdowns under 5 people are hidden.
+
+---
+
+## Cloud Log
+
+*Kept by the cloud session that took over on 2026-09-30. Newest entries last. Work happens on branch `ccr-4bbdd9ba-k1u637` (cut from `handoff/cloud-2026-09-30` at `24beaa5`); its pull request targets `handoff/cloud-2026-09-30` so CI runs and the diff stays clean until the owner merges #35/#46/#47.*
+
+### 2026-09-30
+
+- **Suites on the handoff tip (`24beaa5`), run one at a time:** unit 31/31, API 76/76, site 2/2, browser 15/15 (Chromium from `/opt/pw-browsers`, about 60 s). Matches the handoff.
+- **P0.1 started:** three independent read-only reviewers (roster/organizing trust; workspace governance and tally attestation; threat model and docs against the code, plus the small server changes). Their findings are verified by hand before anything is changed; results are logged below.
