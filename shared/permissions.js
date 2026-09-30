@@ -31,6 +31,7 @@ export const PERMS = {
   'vote.tally': ['*'], // who counts a vote is fixed when it opens: the routes check the vote's own committee, so removing the role afterwards cannot stop the count
   'grievance.submit': ['*'],
   'grievance.list': ['*'],
+  'grievance.share': ['*'], // only someone holding the case key can hand it on; the route checks that
   'grievance.assign': ['chief_steward'],
   'grievance.work': ['steward', 'chief_steward'],
   'procedure.read': ['*'],

@@ -73,7 +73,11 @@ export async function CaseDetail({ id }) {
     div({ class: 'row between' }, h1(g.stepName || t('Case')), g.status === 'closed' ? badge(t('Closed'), 'ok') : urgencyBadge(g.urgency)),
     p({ class: 'muted' }, `${t('Filed {d}', { d: fmtDate(g.filedOn) })}${g.articleRef ? ' · ' + g.articleRef : ''} · ${g.assignedTo ? t('Steward: {name}', { name: g.assignedTo.name }) : t('No steward yet')}`),
     content ? div({ class: 'card' }, h2(t('What happened')), p({ class: 'pre' }, content.what), content.when ? p({ class: 'small' }, t('When: {x}', { x: content.when })) : null, content.who ? p({ class: 'small' }, t('Who: {x}', { x: content.who })) : null, content.desired ? p({ class: 'small' }, t('What would fix it: {x}', { x: content.desired })) : null)
-      : callout('warn', t('You do not hold the key to read this case. Ask the chief steward to assign it to you.')),
+      : callout('warn', t('You do not hold the key to read this case. Ask the worker, or a steward who is on the case, to share it with you.')),
+    key && g.missingKeys?.length ? div({ class: 'card' }, h3(t('Not everyone who should can read this case')),
+      p({ class: 'small muted' }, t('These chief stewards were appointed after the case was filed, so they cannot read or work it until someone who holds the key shares it with them. Sharing seals the key to them alone.')),
+      g.missingKeys.map((m) => div({ class: 'row' }, span(m.name),
+        btn(t('Share this case with {name}', { name: m.name }), act(async () => { await wcall('POST', `/api/ws/grievances/${id}/share`, { memberId: m.memberId, sealedKey: C.boxSeal(m.boxPublicKey, key) }); render(); }), { kind: 'secondary small' })))) : null,
     div({ class: 'card' }, h2(t('Steps and deadlines')), ul({ class: 'timeline' }, g.steps.map((s) => li({ class: s.completedOn ? 'done' : s.n === g.currentStep && g.status === 'open' ? 'now' : '' },
       strong(s.name), ' ', span({ class: 'small muted' }, `${s.days} ${s.dayType === 'business' ? t('business days') : t('calendar days')}`),
       s.completedOn ? span({ class: 'small' }, ` · ${t('done {d}', { d: fmtDate(s.completedOn) })}: ${s.outcome}`) : s.dueOn ? span({ class: 'small' }, ` · ${t('due {d}', { d: fmtDate(s.dueOn) })} `) : null, !s.completedOn ? urgencyBadge(s.urgency) : null)))),

@@ -589,8 +589,9 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     // the case key: the sealed key is what proves the worker's case was entrusted to you. A role alone (a chief steward granted yesterday) is not
     // enough, or one officer could give themselves the role and take over, reassign or close a case they can't even read.
     const keyed = !!g && !!JSON.parse(g.sealed_keys)[me.id];
-    const allowed = g && (mode === 'read' ? (chief || g.assigned_to === me.id || g.submitted_by === me.id) : (chief || g.assigned_to === me.id) && keyed);
-    if (!allowed) fail(404, 'not_found'); // never reveal whether a case exists to someone who cannot see it
+    const reader = g && (chief || g.assigned_to === me.id || g.submitted_by === me.id);
+    if (!reader || (mode === 'work' && !chief && g.assigned_to !== me.id)) fail(404, 'not_found'); // never reveal whether a case exists to someone who cannot see it
+    if (mode === 'work' && !keyed) fail(409, 'no_case_key'); // a chief steward can already see the case is there; say why it cannot be worked (someone holding the key can hand it on)
     return g;
   }
   function grievanceMeta(me, g) {
@@ -640,7 +641,11 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
       ...grievanceMeta(me, g),
       content: { ciphertext: g.content_ciphertext, nonce: g.content_nonce }, sealedKey: JSON.parse(g.sealed_keys)[me.id] || null,
       reason: g.reason_ciphertext ? { ciphertext: g.reason_ciphertext, nonce: g.reason_nonce } : null,
-      canWork: me.roles.has('chief_steward') || (g.assigned_to === me.id && me.roles.has('steward')),
+      canWork: !!JSON.parse(g.sealed_keys)[me.id] && (me.roles.has('chief_steward') || (g.assigned_to === me.id && me.roles.has('steward'))),
+      // Who should be able to read the case but has no key for it (a chief steward appointed after it was filed). Shown only to people who hold
+      // the key, since only they can hand it on.
+      missingKeys: JSON.parse(g.sealed_keys)[me.id] ? holders(me.wsId, 'chief_steward', true).filter((c) => !JSON.parse(g.sealed_keys)[c.id])
+        .map((c) => ({ memberId: c.id, name: nameOf(me.dk, c.id), boxPublicKey: c.box_public_key })) : [],
       steps: db.prepare('SELECT step_number n, name, days, day_type dayType, started_on startedOn, due_on dueOn, completed_on completedOn, outcome FROM ws_grievance_steps WHERE grievance_id=? ORDER BY step_number').all(g.id)
         .map((s) => ({ ...s, urgency: s.dueOn && !s.completedOn ? urgency(s.dueOn, me.today) : null })),
       notes: db.prepare('SELECT id, author_member_id a, ciphertext, nonce, created_at t FROM ws_grievance_notes WHERE grievance_id=? ORDER BY created_at').all(g.id)
@@ -659,6 +664,24 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     db.prepare('UPDATE ws_grievances SET assigned_to=?, sealed_keys=? WHERE id=?').run(b.stewardId, JSON.stringify(keys), g.id);
     audit(me.wsId, me.id, 'grievance.assigned', 'grievance', g.id);
     return { assigned: true };
+  });
+
+  // Handing a case on: someone who holds the case key (the worker, or a steward already on it) seals it to a chief steward or steward who has none,
+  // typically a new chief steward. It only ever adds a key, never replaces one, and the worker sees it in their access log.
+  W('POST', '/api/ws/grievances/:id/share', 'grievance.share', ({ me, params, body: b }) => {
+    const g = grievanceFor(me, params.id, 'read');
+    if (!JSON.parse(g.sealed_keys)[me.id]) fail(409, 'no_case_key');
+    need(isUuid(b.memberId) && isB64(b.sealedKey, 60, 300));
+    const to = db.prepare(`SELECT m.id FROM ws_members m JOIN ws_roles r ON r.member_id=m.id WHERE m.id=? AND m.workspace_id=? AND r.role IN ('steward','chief_steward') AND r.removed_at IS NULL AND m.box_public_key IS NOT NULL`).get(b.memberId, me.wsId);
+    if (!to) fail(404, 'steward_not_found');
+    const keys = JSON.parse(g.sealed_keys);
+    if (keys[b.memberId]) return { shared: false }; // already has one: never replaced
+    keys[b.memberId] = b.sealedKey;
+    db.transaction(() => {
+      db.prepare('UPDATE ws_grievances SET sealed_keys=? WHERE id=?').run(JSON.stringify(keys), g.id);
+      audit(me.wsId, me.id, 'grievance.shared', 'member', g.submitted_by);
+    })();
+    return { shared: true };
   });
 
   W('POST', '/api/ws/grievances/:id/notes', 'grievance.work', ({ me, params, body: b }) => {

@@ -683,7 +683,8 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     const junk = C.boxSeal(ws.members[3].keys.boxPublicKey, C.randomBytes(32));
     for (const [route, body] of [['assign', { stewardId: ws.members[3].id, sealedKey: junk }], ['decision', { decision: 'not_pursued', reasonCiphertext: 'x'.repeat(30), reasonNonce: 'y'.repeat(32) }],
       ['notify-worker', {}], ['close', {}], ['steps/complete', { outcome: 'denied' }], ['notes', { ciphertext: 'x'.repeat(30), nonce: 'y'.repeat(32) }]]) {
-      assert.equal((await ws.as(3, 'POST', `/api/ws/grievances/${id}/${route}`, body)).status, 404, route); // ...but cannot act on one he was never entrusted with
+      const r = await ws.as(3, 'POST', `/api/ws/grievances/${id}/${route}`, body); // ...but cannot act on one he was never entrusted with, and is told why
+      assert.deepEqual([r.status, r.json.error], [409, 'no_case_key'], route);
     }
     assert.deepEqual(h.app.db.prepare('SELECT sealed_keys k, assigned_to a, decision d, status s FROM ws_grievances WHERE id=?').get(id), before); // nothing changed
     // a key holder cannot overwrite another person's key either (a junk key would lock the real steward out)
@@ -692,6 +693,29 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     assert.equal((await ws.as(CHIEF, 'POST', `/api/ws/grievances/${id}/assign`, { stewardId: ws.members[STEW].id, sealedKey: C.boxSeal(ws.members[STEW].keys.boxPublicKey, C.randomBytes(32)) })).status, 200);
     assert.equal(JSON.parse(h.app.db.prepare('SELECT sealed_keys k FROM ws_grievances WHERE id=?').get(id).k)[ws.members[STEW].id], samKey);
     assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[3].id, role: 'chief_steward', op: 'remove' })).status, 200);
+  });
+
+  it('when a new chief steward takes over, whoever holds the case key can hand it on, so no case is left stranded', async () => {
+    const EZRA = 3;
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'add' })).status, 200);
+    const mine = (await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.deepEqual(mine.missingKeys, [{ memberId: ws.members[EZRA].id, name: 'Ezra Qqqelect', boxPublicKey: ws.members[EZRA].keys.boxPublicKey }]); // the worker is shown who cannot read it yet
+    const his = (await ws.as(EZRA, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.deepEqual([his.canWork, his.sealedKey], [false, null]); // not offered work he cannot do
+    const share = (i, memberId, sealedKey) => ws.as(i, 'POST', `/api/ws/grievances/${id}/share`, { memberId, sealedKey });
+    const toEzra = C.boxSeal(ws.members[EZRA].keys.boxPublicKey, key);
+    assert.equal((await share(OTHER, ws.members[EZRA].id, toEzra)).status, 404); // someone with no part in the case
+    assert.equal((await share(EZRA, ws.members[EZRA].id, toEzra)).json.error, 'no_case_key'); // nobody hands a case to themselves
+    assert.equal((await share(WORKER, ws.members[OTHER].id, C.boxSeal(ws.members[OTHER].keys.boxPublicKey, key))).json.error, 'steward_not_found'); // only to a steward
+    assert.equal((await share(CHIEF, ws.members[EZRA].id, toEzra)).status, 200); // the outgoing chief (or the worker) hands it on
+    const g = (await ws.as(EZRA, 'GET', `/api/ws/grievances/${id}`)).json;
+    assert.equal(g.canWork, true);
+    assert.match(C.openJson(openKey(EZRA, g.sealedKey), g.content, 'grievance|' + id).what, /hours were cut/);
+    assert.deepEqual((await ws.as(WORKER, 'GET', `/api/ws/grievances/${id}`)).json.missingKeys, []);
+    assert.equal((await share(WORKER, ws.members[EZRA].id, C.boxSeal(ws.members[EZRA].keys.boxPublicKey, C.randomBytes(32)))).status, 200); // a second hand-over...
+    assert.equal(JSON.parse(h.app.db.prepare('SELECT sealed_keys k FROM ws_grievances WHERE id=?').get(id).k)[ws.members[EZRA].id], toEzra); // ...never replaces a key
+    assert.ok((await ws.as(WORKER, 'GET', '/api/ws/me/access-log')).json.entries.some((e) => e.action === 'grievance.shared')); // and the worker sees it happened
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'remove' })).status, 200);
   });
 
   it('steps start their own clocks, and overdue steps show up for the union', async () => {
