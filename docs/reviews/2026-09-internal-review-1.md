@@ -27,7 +27,7 @@ Severity is our judgement after checking, not the reviewer's label. "Ran" means 
 | R-02 | **Critical** | **Made-up tally.** One election-committee member could post any counts without the ballot key, and the server applied the vote's effect (a recall, dues, bylaws). Ran. | ws WS-01, crypto C3 | A decision with an effect always needs the ballot key, so the server recounts it. A result without the key needs signatures over the same counts from *k* different committee members. |
 | R-03 | High | **"No" could win as "passed".** `plurality` counted any unique winner as passed, and creators chose option order, so a recall where "Keep" won removed the role. Ran. | ws WS-02 | Effect votes have fixed options (option 0 is the action) and only majority or two-thirds rules. |
 | R-04 | High | **Recall circumvention.** A recall's target could open it with a few seconds' window, close it at once, sit on its committee, or hand the role back afterwards. Ran. | ws WS-05 | Minimum voting period (24 h, `MIN_VOTE_HOURS`); nobody can end a vote before everyone has voted; nobody can open or count their own recall; a role removed by a vote returns only by a vote. |
-| R-05 | High | **Fake officers and voters.** `POST /members` took `status` and `roles` from the request, so one officer could create voting members and officers in one call. Ran. | ws WS-06 | New people are unit employees with no roles; only members who have joined can hold a role; nobody grants themselves one. |
+| R-05 | High | **Fake officers and voters.** `POST /members` took `status` and `roles` from the request, so one officer could create voting members and officers in one call. Ran. | ws WS-06 | New people are unit employees with no roles; only members who have joined can hold a role; nobody grants themselves one. **Narrowed, not closed** (second pass, below): the one-call path is gone, but one officer can still bring in people they control. |
 | R-06 | High | **Grievance takeover.** A chief steward granted a role yesterday could reassign, decide and close a case they hold no key for, and overwrite another person's sealed key with junk. Ran. | ws WS-07 | Working a case takes its key; assigning never replaces anyone's key. |
 | R-07 | High | **Cast order left on disk.** SQLite stores each new row below the previous one in its page, so ballots and receipts sat in the order people voted; with session times, a database copy lined ballots up with voters. Ran (12 of 12 recovered). | ws WS-03, crypto C5 | Every cast rewrites the vote's rows in random order; a test reads the SQLite file back the way a copy would and checks the order. |
 | R-08 | High | **The export leaked open votes.** Ballots and receipts of votes still open were included, so polling it isolated each ballot with its receipt. Ran. | ws WS-04 (part) | Ballots and receipts leave only once the vote is counted. |
@@ -53,6 +53,23 @@ It is tested three ways: adversarial unit tests that play every move a lying ser
 
 What is still open, and stated in the threat model: the founder is the anchor of trust; a signer trusts whoever gave them the link; the workspace's grievance and vote keys ([#37](https://github.com/ChrisRyanWill/project-ludlow/issues/37)); and everything assumes the app itself was not altered.
 
+### Update, 30 September: a second pass over the fixes
+
+The fixes above had only their author's tests, so three new read-only reviewers (same model family; still not an independent audit) went over the changed code: the roster, the workspace governance fixes, and every public claim against the code. Each claim was re-checked by hand; each fix below was written test first and the new test was seen to fail on the old code. The roster held up: no reviewer could make a genuine client seal to a key the server controls.
+
+| Finding | What changed |
+|---|---|
+| **Rate limits could be sidestepped behind a proxy.** A hosting company's client-address header was trusted behind any proxy, where it is whatever the client sends. | Only `X-Forwarded-For`, counted from the end, is read; a malformed `TRUST_PROXY` stops the server. |
+| **A recall could be blocked or dodged by its target.** Counting required the committee role at count time; stepping down just before the count left no record that a vote removed the role. | Counting is authorized by the vote's own committee; a passed recall marks the role either way. |
+| **"No" could pass** for ratification and strike votes (free options and plurality). | Fixed Yes/No with majority or two-thirds. |
+| **The confirmation-email caps** could be sidestepped by withdrawing cards and by spelling an address differently; a refused request used up a slot; two simultaneous requests could both send. | In-memory per-campaign count, per-mailbox count, slot reserved only when sending, one send per card at a time. |
+| **The founder signed whatever threshold the server listed**, and a trustee link could be placed in the founder's seat. | The founder's device remembers the plan and refuses a different one; the confirm step states the k-of-n; enrollment checks the seat against the link. |
+| **A grievance was stranded** when the chief steward changed (a regression from R-06). | Whoever holds the case key can hand it to a new steward or chief steward (adds only, logged for the worker). |
+| The WAL journal would put a "has voted" update next to its ballot; the trigger comment overstated what it guards; the tripwire test missed six ways to seal to the server's keys. | Journal pinned to `DELETE`; comment corrected; the tripwire checks each sealing call and tests itself against nine known-bad changes. |
+| Many public sentences were stale or too strong (listed in the pull request). | Corrected in the threat model, README, site, the members' data page and the app's own wording. |
+
+**Still open from this pass:** one officer can still bring in accounts they control and give them roles, which weakens two-officer approval and a committee-signed count (#43, now rated High); founding a workspace needs no proof that it comes from a campaign's trustees; whether ratification and strike votes should also require the key to be published. These need design decisions and are described in the pull request for the maintainer.
+
 ### Open: needs a design decision or independent review
 
 Each has an issue with the reasoning and options.
@@ -66,7 +83,7 @@ Each has an issue with the reasoning and options.
 | Low to medium | Request signatures do not cover the body; encrypted fields are not bound to their row; weak passphrases are accepted. | [#40](https://github.com/ChrisRyanWill/project-ludlow/issues/40) |
 | Low to medium | Ledger payee commitments are unverifiable; the audit view is a window of 500 unanchored entries. | [#41](https://github.com/ChrisRyanWill/project-ludlow/issues/41) |
 | Medium | Grievance clocks start when someone clicks, not from the incident date, so due dates can be later than the contract's. **Treat every date as a reminder.** | [#42](https://github.com/ChrisRyanWill/project-ludlow/issues/42) |
-| Medium | Governance: sensitive roles take one officer; claim-link transparency; petition deadlines; officer elections (flag off). | [#43](https://github.com/ChrisRyanWill/project-ludlow/issues/43) |
+| **High** | Governance: sensitive roles take one officer, and one officer can bring in accounts they control (see the second pass); claim-link transparency; petition deadlines; officer elections (flag off). | [#43](https://github.com/ChrisRyanWill/project-ludlow/issues/43) |
 | Low to medium | What a database copy or an officer can still see: audit entries naming workers, session times, small-group subtraction. | [#44](https://github.com/ChrisRyanWill/project-ludlow/issues/44) |
 | Low | The Docker image and CI run on Node 20 (end of life); unpinned Actions. Needs the maintainer's decision. | [#45](https://github.com/ChrisRyanWill/project-ludlow/issues/45) |
 
