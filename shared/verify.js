@@ -41,24 +41,28 @@ export function checkPinned(entries, pin) {
 // swapped afterwards (even by someone holding the master key) without the chain, or the pinned head, noticing. Redacted entries carry no salt
 // and are skipped. `entries` come from the summary, `chain` from the chain route.
 export function checkCommitments(entries, chain) {
-  const commitOf = new Map(chain.map((c) => [c.seq, c.commit]));
-  // Every entry the app writes has a salt, so an entry members may see that arrives without one was tampered with: it fails, it is not skipped.
-  const visible = [...entries].filter((e) => !REDACTED_CATEGORIES.includes(e.category)).sort((a, b) => a.seq - b.seq);
-  for (const e of visible) {
-    if (typeof e.salt !== 'string' || sha256Text(`${e.salt}|${e.payee || ''}|${e.memo || ''}`) !== commitOf.get(e.seq)) return { ok: false, checked: visible.length, brokenAt: e.seq };
+  // Walk the VERIFIED chain, not the summary: which entries are redacted, their category and their amount all come from the chain, so a server
+  // cannot relabel an entry to have it skipped, change the amount shown, or leave an entry out.
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const visible = [...chain].filter((c) => !REDACTED_CATEGORIES.includes(c.cat)).sort((a, b) => a.seq - b.seq);
+  for (const c of [...chain].sort((a, b) => a.seq - b.seq)) {
+    const e = bySeq.get(c.seq);
+    if (!e || e.category !== c.cat || e.amountCents !== c.cents) return { ok: false, checked: visible.length, brokenAt: c.seq };
+    if (REDACTED_CATEGORIES.includes(c.cat)) continue;
+    // Every entry the app writes has a salt, so a visible one that arrives without it was tampered with.
+    if (typeof e.salt !== 'string' || sha256Text(`${e.salt}|${e.payee || ''}|${e.memo || ''}`) !== c.commit) return { ok: false, checked: visible.length, brokenAt: c.seq };
   }
   return { ok: true, checked: visible.length, brokenAt: null };
 }
 
-// The audit page lists entries with names attached; the browser checked a separate copy (the chain, without names). What is shown must be what was
-// checked, so each row is built from the chain entry with the same seq, and the page contributes only the actor's name, and only if it names the
-// same actor the chain does. A row the chain does not have is marked, not shown as checked.
-export function auditRows(entries, chain) {
-  const bySeq = new Map(chain.map((c) => [c.seq, c]));
-  return entries.map((e) => {
-    const c = bySeq.get(e.seq);
-    if (!c || c.hash !== e.hash) return { seq: e.seq, actor: null, action: e.action, at: e.at, ok: false };
-    return { seq: c.seq, actor: e.actorId === c.actorId ? e.actor ?? null : null, action: c.action, at: c.at, ok: true };
+// The audit page lists entries with names attached; the browser checked a separate copy (the chain, without names). What is shown must be what was checked.
+export function auditRows(entries, chain, count) {
+  // Rows are the newest `count` entries of the VERIFIED chain; a row the server leaves out of its page is still listed. The page supplies only the
+  // actor's name, and only when it names the same actor as the chain.
+  const names = new Map(entries.map((e) => [e.seq, e]));
+  return [...chain].sort((a, b) => b.seq - a.seq).slice(0, count).map((c) => {
+    const e = names.get(c.seq);
+    return { seq: c.seq, actor: e && e.hash === c.hash && e.actorId === c.actorId ? e.actor ?? null : null, action: c.action, at: c.at, ok: true };
   });
 }
 

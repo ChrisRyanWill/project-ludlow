@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { zip, crc32, csvCell, toCsv } from '../web/src/zip.js';
-import { verifyChain, auditFields, checkPinned, cardTextMatches, auditRows, compareKeyPins } from '../shared/verify.js';
+import { verifyChain, auditFields, checkPinned, cardTextMatches, auditRows, compareKeyPins, checkCommitments } from '../shared/verify.js';
 import { authenticate, rosterToSign, checkMySeat, checkEnrollment, RosterError } from '../shared/roster.js';
 
 await C.ready;
@@ -663,12 +663,13 @@ test('mailbox counting: spellings of one inbox count as one', () => {
 test('the audit rows on screen are the ones that were checked: only the name comes from the page', () => {
   const chain = [{ seq: 1, actorId: 'a', action: 'role.add:officer', type: 'member', id: 'x', at: 't1', hash: 'h1' }, { seq: 2, actorId: 'b', action: 'member.pii.read', type: 'member', id: 'y', at: 't2', hash: 'h2' }];
   const page = [{ ...chain[1], actor: 'Bea' }, { ...chain[0], actor: 'Al' }];
-  assert.deepEqual(auditRows(page, chain).map((r) => [r.seq, r.actor, r.action, r.ok]), [[2, 'Bea', 'member.pii.read', true], [1, 'Al', 'role.add:officer', true]]);
+  assert.deepEqual(auditRows(page, chain, 2).map((r) => [r.seq, r.actor, r.action]), [[2, 'Bea', 'member.pii.read'], [1, 'Al', 'role.add:officer']]);
   const lied = [{ ...chain[1], action: 'nothing to see', actor: 'Bea' }, { ...chain[0], actorId: 'b', actor: 'Bea' }];
-  const rows = auditRows(lied, chain);
-  assert.deepEqual(rows.map((r) => [r.action, r.ok]), [['member.pii.read', true], ['role.add:officer', true]]); // what is shown comes from the checked chain...
+  const rows = auditRows(lied, chain, 2);
+  assert.deepEqual(rows.map((r) => r.action), ['member.pii.read', 'role.add:officer']); // what is shown comes from the checked chain...
   assert.equal(rows[1].actor, null); // ...and a name the page attaches to a different person is not shown
-  assert.equal(auditRows([{ ...chain[0], seq: 9, hash: 'h9', actor: 'Al' }], chain)[0].ok, false); // a row the chain does not have
+  // a row the server leaves out of its page is still listed, from the chain, just without a name
+  assert.deepEqual(auditRows([{ ...chain[0], actor: 'Al' }], chain, 2).map((r) => [r.seq, r.actor]), [[2, null], [1, 'Al']]);
 });
 
 test('role holders\' keys are remembered per device, and a changed key is reported before anything is sealed to it', () => {
@@ -703,4 +704,15 @@ test('the guide shows the one next step for where a person is, and nothing when 
   assert.equal(workspaceStep({ ...w, overdueCase: { id: 'g1' } }).href, '/w/help/g1');
   assert.equal(workspaceStep({ ...w, isMember: false }).id, 'join');
   assert.equal(workspaceStep({ ...w, isMember: false, voteNow: { id: 'v2', title: 'x' } }).id, 'vote-v2'); // the most urgent first
+});
+
+test('ledger check: what is checked, and what category and amount an entry has, come from the verified chain, not the summary', () => {
+  const salt = 's1', commit = C.sha256Text(`${salt}|Real Payee|`);
+  const chain = [{ seq: 1, cat: 'office', cents: 500, commit }];
+  const good = [{ seq: 1, category: 'office', amountCents: 500, payee: 'Real Payee', memo: '', salt }];
+  assert.deepEqual(checkCommitments(good, chain), { ok: true, checked: 1, brokenAt: null });
+  // the server relabels the entry as a redacted category so it is skipped, or changes the amount shown
+  assert.equal(checkCommitments([{ ...good[0], category: 'member_benefits', payee: 'Member', salt: undefined }], chain).ok, false);
+  assert.equal(checkCommitments([{ ...good[0], amountCents: 5 }], chain).ok, false);
+  assert.equal(checkCommitments([], chain).ok, false); // or leaves it out of the summary altogether
 });

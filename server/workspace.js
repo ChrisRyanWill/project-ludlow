@@ -909,9 +909,12 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     const d = db.prepare('SELECT * FROM ws_disbursements WHERE id=? AND workspace_id=?').get(params.id, me.wsId);
     if (!d) fail(404, 'not_found');
     if (d.status !== 'approved') fail(409, 'not_approved');
+    // The ledger is permanent: never write a payee or memo into it that could not be read (a damaged or moved value).
+    const payee = dec(me.dk, 'disb.payee', d.payee_enc, d.id), memo = dec(me.dk, 'disb.memo', d.memo_enc, d.id);
+    if (payee === UNREADABLE || memo === UNREADABLE) fail(409, 'unreadable');
     let r;
     db.transaction(() => {
-      r = addLedger(me, { kind: 'disbursement', amountCents: d.amount_cents, category: d.category, payee: dec(me.dk, 'disb.payee', d.payee_enc, d.id), memo: dec(me.dk, 'disb.memo', d.memo_enc, d.id), disbursementId: d.id });
+      r = addLedger(me, { kind: 'disbursement', amountCents: d.amount_cents, category: d.category, payee, memo, disbursementId: d.id });
       db.prepare("UPDATE ws_disbursements SET status='paid', paid_ledger_id=? WHERE id=?").run(r.id, d.id);
       audit(me.wsId, me.id, 'disbursement.paid', 'disbursement', d.id);
     })();

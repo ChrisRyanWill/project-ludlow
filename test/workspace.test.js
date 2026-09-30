@@ -704,6 +704,12 @@ describe('workspace: money you can audit', () => {
     assert.equal((await ws.as(1, 'POST', `/api/ws/disbursements/${big.id}/approve`, {})).status, 409); // the same officer twice is not two officers
     assert.equal((await ws.as(2, 'POST', `/api/ws/disbursements/${big.id}/approve`, {})).json.status, 'approved');
     assert.equal((await ws.as(0, 'POST', `/api/ws/disbursements/${big.id}/pay`)).status, 200);
+    // a payee that no longer decrypts is not paid into the immutable ledger as "[unreadable]"
+    const bad = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 200, category: 'office', payee: 'Zyxwvut Payee Garbled' })).json;
+    assert.equal((await ws.as(1, 'POST', `/api/ws/disbursements/${bad.id}/approve`, {})).json.status, 'approved');
+    h.app.db.prepare('UPDATE ws_disbursements SET payee_enc=? WHERE id=?').run('v2.AAAA.BBBB', bad.id);
+    const ledgerRows = () => h.app.db.prepare('SELECT COUNT(*) c FROM ws_ledger').get().c, rowsBefore = ledgerRows();
+    assert.deepEqual([(await ws.as(0, 'POST', `/api/ws/disbursements/${bad.id}/pay`)).json.error, ledgerRows()], ['unreadable', rowsBefore]);
     const rej = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 100, category: 'office', payee: 'X' })).json;
     assert.equal((await ws.as(2, 'POST', `/api/ws/disbursements/${rej.id}/approve`, { decision: 'reject' })).json.status, 'rejected');
     const aid = (await ws.as(0, 'POST', '/api/ws/disbursements', { amountCents: 2500, category: 'member_benefits', payee: 'Zyxwvut Payee Hardship', memo: 'Rent help' })).json;

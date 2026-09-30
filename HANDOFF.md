@@ -396,3 +396,9 @@ The owner asked for the app to lead people through every step, "easier than sett
 2. A first-visit guide for signers and members (their own next step on `/m`).
 3. Stewards: the next due step on each case, from the deadline engine.
 4. A short "What happens next" line after every action that finishes something.
+
+**Local review of PR #48 (posted as a PR comment): items 1-3 fixed, 4-10 open.**
+- Fixed 1: paying a request whose payee or memo no longer decrypts is refused (`409 unreadable`) instead of writing `[unreadable]` into the immutable ledger.
+- Fixed 2: `checkCommitments` walks the verified chain; category and amount must match the chain, a relabelled or missing entry fails.
+- Fixed 3: `auditRows` lists the newest entries of the verified chain; a row the server leaves out of its page is still shown (without a name).
+- **Open, in the reviewer's order:** 4 a done-flag for the v1-to-v2 migration (and tests for `disb.*` and a v2 value moved to another column); 5 ask the founder for k and n without printing them; 6 a clean start-up message for `HOST=0.0.0.0` without a key (existing dev data vs new), `LOCALHOST` in any case, README/DEPLOY, the migration is one-way, `/dev/outbox` loopback only; 7 the founder's dashboard shows the key-words box meant for other trustees (then re-shoot `site/img/committee.png`); 8 strike and ratification votes: publish-key box off by default, prominent warning, fix "afterward any member can recount"; 9 "the confirmation email the law requires" names NLRB GC 15-08, and CLAUDE.md rule 9b wording (owner to approve); 10 Spanish fixes (the step-format "naturales" trap and others in the review).
