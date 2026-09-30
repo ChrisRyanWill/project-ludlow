@@ -782,6 +782,11 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     assert.equal((await ws.as(CHIEF, 'GET', '/api/ws/grievances')).json.grievances.length, 1);
     const log = (await ws.as(WORKER, 'GET', '/api/ws/me/access-log')).json.entries;
     assert.ok(log.some((e) => e.action === 'grievance.opened' && e.actor.startsWith('Ofelia'))); // the worker can see who opened their case
+    // ...but the audit log, which every officer can read, does not say who filed it (#44)
+    const workerId = ws.members[WORKER].id;
+    const auditLog = (await ws.as(CHIEF, 'GET', '/api/ws/audit')).json.chain.filter((e) => e.action.startsWith('grievance.'));
+    assert.ok(auditLog.length >= 2);
+    assert.deepEqual(auditLog.filter((e) => e.actorId === workerId || e.id === workerId), []);
   });
 
   it('the chief steward assigns a steward by re-sealing the case key to them', async () => {

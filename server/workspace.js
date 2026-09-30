@@ -203,7 +203,10 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   });
   // Members can always see who looked at their record.
   W('GET', '/api/ws/me/access-log', 'ws.read', ({ me }) => {
-    const rows = db.prepare("SELECT actor_member_id a, action, created_at t FROM ws_audit WHERE workspace_id=? AND resource_type='member' AND resource_id=? AND actor_member_id IS NOT ? ORDER BY seq DESC LIMIT 200").all(me.wsId, me.id, me.id);
+    // What others did with my record, and with the cases I filed (those entries name the case, not me, so officers reading the audit log cannot tell whose it is).
+    const rows = db.prepare(`SELECT actor_member_id a, action, created_at t FROM ws_audit WHERE workspace_id=? AND actor_member_id IS NOT ? AND (
+        (resource_type='member' AND resource_id=?) OR (resource_type='grievance' AND resource_id IN (SELECT id FROM ws_grievances WHERE workspace_id=? AND submitted_by=?)))
+      ORDER BY seq DESC LIMIT 200`).all(me.wsId, me.id, me.id, me.wsId, me.id);
     return { entries: rows.map((r) => ({ at: r.t, action: r.action, actor: nameOf(me.dk, r.a) })) };
   });
 
@@ -638,7 +641,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
           .run(b.id, me.wsId, me.id, articleRef(b.articleRef), b.ciphertext, b.nonce, JSON.stringify(b.sealedKeys), today, now());
         proc.steps.forEach((s, i) => db.prepare('INSERT INTO ws_grievance_steps (grievance_id,step_number,name,days,day_type,started_on,due_on) VALUES (?,?,?,?,?,?,?)')
           .run(b.id, i + 1, s.name, s.days, s.dayType, i === 0 ? today : null, i === 0 ? dueDate(today, s, proc.holidays) : null));
-        audit(me.wsId, me.id, 'grievance.filed', 'grievance', b.id);
+        audit(me.wsId, null, 'grievance.filed', 'grievance', b.id); // no actor: officers read this log, and who filed a case is not theirs to know (#44)
       })();
     } catch (e) { constraint(e); }
     return { grievanceId: b.id };
@@ -654,7 +657,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
 
   W('GET', '/api/ws/grievances/:id', 'grievance.list', ({ me, params }) => {
     const g = grievanceFor(me, params.id, 'read');
-    if (g.submitted_by !== me.id) audit(me.wsId, me.id, 'grievance.opened', 'member', g.submitted_by); // the worker can see who opened their case
+    if (g.submitted_by !== me.id) audit(me.wsId, me.id, 'grievance.opened', 'grievance', g.id); // the worker sees it in their access log; officers see a case, not whose
     return {
       ...grievanceMeta(me, g),
       content: { ciphertext: g.content_ciphertext, nonce: g.content_nonce }, sealedKey: JSON.parse(g.sealed_keys)[me.id] || null,
@@ -697,7 +700,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     keys[b.memberId] = b.sealedKey;
     db.transaction(() => {
       db.prepare('UPDATE ws_grievances SET sealed_keys=? WHERE id=?').run(JSON.stringify(keys), g.id);
-      audit(me.wsId, me.id, 'grievance.shared', 'member', g.submitted_by);
+      audit(me.wsId, me.id, 'grievance.shared', 'grievance', g.id);
     })();
     return { shared: true };
   });
