@@ -965,11 +965,13 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     const q = (sql, ...a) => db.prepare(sql).get(...a);
     const total = q('SELECT COUNT(*) c FROM ws_members WHERE workspace_id=?', me.wsId).c;
     const members = q("SELECT COUNT(*) c FROM ws_members WHERE workspace_id=? AND membership_status='member'", me.wsId).c;
-    // Small groups are hidden so nobody can be picked out. If exactly one is hidden, the totals would give it away (everyone minus the groups
-    // shown), so the next smallest group is hidden with it.
+    // Small groups are hidden so nobody can be picked out. The totals (everyone minus the groups shown) would give the hidden ones away, so more
+    // groups are hidden with them.
     const groups = db.prepare("SELECT COALESCE(shift,'(none)') s, COUNT(*) t, SUM(membership_status='member') m FROM ws_members WHERE workspace_id=? GROUP BY s").all(me.wsId);
     const hide = new Set(groups.filter((r) => r.t < SMALL_GROUP).map((r) => r.s));
-    if (hide.size === 1) { const next = groups.filter((r) => !hide.has(r.s)).sort((a, b) => a.t - b.t)[0]; if (next) hide.add(next.s); }
+    // ...and keep hiding the next smallest until the hidden groups together hold at least SMALL_GROUP people, or the totals give them away
+    const hiddenTotal = () => groups.filter((r) => hide.has(r.s)).reduce((a, r) => a + r.t, 0);
+    while (hide.size && hiddenTotal() < SMALL_GROUP) { const next = groups.filter((r) => !hide.has(r.s)).sort((a, b) => a.t - b.t)[0]; if (!next) break; hide.add(next.s); }
     const shifts = groups.map((r) => (hide.has(r.s) ? { shift: r.s, suppressed: true } : { shift: r.s, total: r.t, members: r.m }));
     const open = q("SELECT COUNT(*) c FROM ws_grievances WHERE workspace_id=? AND status='open'", me.wsId).c;
     const overdue = q(`SELECT COUNT(*) c FROM ws_grievance_steps s JOIN ws_grievances g ON g.id=s.grievance_id WHERE g.workspace_id=? AND g.status='open' AND g.current_step=s.step_number AND s.completed_on IS NULL AND s.due_on < ?`, me.wsId, me.today).c;

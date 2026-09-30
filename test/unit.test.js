@@ -8,6 +8,7 @@ import { evaluateVote, complianceTasks } from '../shared/constants.js';
 import { makeLimiter } from '../server/rate.js';
 import { clientIp } from '../server/http.js';
 import { loadMasterKey } from '../server/kms.js';
+import { mailboxKey } from '../server/campaign.js';
 import { loadConfig } from '../server/config.js';
 import { openDb } from '../server/db.js';
 import Database from 'better-sqlite3';
@@ -641,4 +642,19 @@ test('translations: every Spanish entry belongs to an English sentence the app s
   const src = ['../web/src', '../shared'].flatMap((d) => { const dir = path.resolve(import.meta.dirname, d); return readdirSync(dir).filter((f) => f.endsWith('.js') && f !== 'es.js').map((f) => readFileSync(path.join(dir, f), 'utf8')); }).join('\n');
   const used = (k) => [k, k.replace(/'/g, "\\'"), k.replace(/"/g, '\\"')].some((v) => src.includes(v));
   assert.deepEqual(Object.keys(es).filter((k) => !used(k)), []);
+});
+
+test('what the roster check returns cannot be changed afterwards (keys are sealed only to what it vouched for)', () => {
+  const w = rosterWorld(3, 2);
+  for (const a of [authenticate(w.raw(), w.commit, 'camp-1'), authenticate(w.raw({ roster: null }), w.commit, 'camp-1'), rosterToSign(w.raw({ roster: null }), 'camp-1', w.ts[0].keys)]) {
+    assert.throws(() => { a.seats = []; }, TypeError);
+    assert.throws(() => { a.seats.push({ index: 9, boxPublicKey: 'x' }); }, TypeError);
+    assert.throws(() => { a.seats[0].boxPublicKey = 'x'; }, TypeError);
+  }
+});
+
+test('mailbox counting: spellings of one inbox count as one', () => {
+  assert.equal(mailboxKey('Victim@Gmail.com.'), mailboxKey('victim@gmail.com'));
+  assert.equal(mailboxKey('v.i.c.t.i.m+x@googlemail.com..'), mailboxKey('victim@gmail.com'));
+  assert.notEqual(mailboxKey('a.b@example.org'), mailboxKey('ab@example.org'));
 });

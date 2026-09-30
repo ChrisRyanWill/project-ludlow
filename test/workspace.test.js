@@ -927,6 +927,11 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     const three = (await t.as(0, 'GET', '/api/ws/health')).json.shifts;
     assert.deepEqual(three.filter((x) => x.suppressed).map((x) => x.shift).sort(), ['Evening', 'Night']);
     assert.deepEqual(three.find((x) => x.shift === 'Day'), { shift: 'Day', total: 7, members: 7 });
+    // two tiny groups hidden together still add up to only 2 people, and the members total would tell their status: keep hiding until 5 or more
+    const u = await makeWorkspace(h, [...Array.from({ length: 10 }, (_, i) => person(`D${i} Qqq`, i, { shift: 'Day', ...(i === 0 ? { roles: ['officer'] } : {}) })),
+      ...Array.from({ length: 6 }, (_, i) => person(`E${i} Qqq`, i, { shift: 'Evening' })), person('N0 Qqq', 1, { shift: 'Night' }), person('W0 Qqq', 2, { shift: 'Weekend' })]);
+    const four = (await u.as(0, 'GET', '/api/ws/health')).json.shifts;
+    assert.deepEqual(four.filter((x) => x.suppressed).map((x) => x.shift).sort(), ['Evening', 'Night', 'Weekend']);
     assert.equal((await ws.as(4, 'GET', '/api/ws/health')).status, 403);
     const cal = (await ws.as(0, 'GET', '/api/ws/compliance')).json.tasks;
     assert.ok(cal.find((t) => t.key === 'lm1').dueOn);

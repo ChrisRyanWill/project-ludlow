@@ -8,6 +8,8 @@ export class RosterError extends Error {
 }
 const KEY43 = /^[A-Za-z0-9_-]{43}$/;
 const isKey = (s) => typeof s === 'string' && KEY43.test(s);
+// What the checks below return is frozen, all the way down: code that seals may read the vouched-for seats but never swap one in afterwards.
+const frozen = (o) => { for (const v of Object.values(o)) if (v && typeof v === 'object') frozen(v); return Object.freeze(o); };
 export const isCommit = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{22}$/.test(s);
 
 // raw: the campaign meta the server returned; commit: the founder key check carried by the invitation link; campaignId: the campaign the link is for.
@@ -19,13 +21,13 @@ export function authenticate(raw, commit, campaignId) {
   if (!seat1 || !seat1.enrolled || !isKey(seat1.boxPublicKey) || !isKey(seat1.signPublicKey)) throw new RosterError('no_founder');
   if (founderCommit(seat1.boxPublicKey, seat1.signPublicKey) !== commit) throw new RosterError('founder_mismatch');
   const founder = { boxPublicKey: seat1.boxPublicKey, signPublicKey: seat1.signPublicKey };
-  if (!raw.roster) return { mode: 'solo', founder, seats: [{ index: 1, boxPublicKey: founder.boxPublicKey }], k: null };
+  if (!raw.roster) return frozen({ mode: 'solo', founder, seats: [{ index: 1, boxPublicKey: founder.boxPublicKey }], k: null });
   const { roster, signature } = raw.roster;
   if (!verifyRoster(founder.signPublicKey, signature, roster) || roster.campaignId !== campaignId) throw new RosterError('roster_invalid');
   if (roster.seats[0].boxPublicKey !== founder.boxPublicKey) throw new RosterError('roster_invalid'); // seat 1 is the founder
   // The server's own list must agree with what was signed. It cannot change what we seal to, but a difference means something is wrong.
   if (roster.n !== raw.n || roster.k !== raw.k || roster.seats.some((s) => raw.trustees.find((x) => x.index === s.index)?.boxPublicKey !== s.boxPublicKey)) throw new RosterError('roster_mismatch');
-  return { mode: 'shamir', founder, seats: roster.seats.map((s) => ({ index: s.index, boxPublicKey: s.boxPublicKey })), k: roster.k };
+  return frozen({ mode: 'shamir', founder, seats: roster.seats.map((s) => ({ index: s.index, boxPublicKey: s.boxPublicKey })), k: roster.k });
 }
 
 // The founder's side: the roster to sign, built from the committee as the server lists it. The founder has checked each trustee's key words against
@@ -39,7 +41,7 @@ export function rosterToSign(raw, campaignId, ownKeys, plan) {
   if (plan && (plan.k !== raw.k || plan.n !== raw.n)) throw new RosterError('plan_mismatch');
   const roster = { campaignId, k: raw.k, n: raw.n, seats: seats.map((x) => ({ index: x.index, boxPublicKey: x.boxPublicKey })) };
   if (!rosterShapeOk(roster)) throw new RosterError('roster_invalid');
-  return roster;
+  return frozen(roster);
 }
 
 // A trustee's own check on a roster that has been signed: does the founder's signature verify, and is MY key in my seat?

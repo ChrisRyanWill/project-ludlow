@@ -12,7 +12,7 @@ const isB64 = (s, min, max) => typeof s === 'string' && s.length >= min && s.len
 const isTok = (s) => isB64(s, 43, 43); // 32 bytes, base64url
 const isUuid = (s) => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 const isStr = (s, max) => typeof s === 'string' && s.length > 0 && s.length <= max;
-const EMAIL = /^[^\s@<>,;"]{1,64}@[^\s@<>,;"]{1,190}\.[^\s@<>,;"]{2,}$/;
+const EMAIL = /^[^\s@<>,;"]{1,64}@[^\s@<>,;"[\]]{1,190}\.[^\s@<>,;"[\].]{2,}$/; // no address literals ([1.2.3.4]) and no trailing dot
 const TEMPLATE = /^card-v\d+(-[a-z]{2,3})?$/;
 const now = () => new Date().toISOString();
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -25,7 +25,8 @@ export function sweepInactive(db, days) {
 
 // The mailbox an address reaches, for counting only: case, a "+tag" and (for Gmail) dots do not make it a different inbox.
 export function mailboxKey(address) {
-  const [local, domain] = String(address).trim().toLowerCase().split(/@(?=[^@]*$)/);
+  const [local, domain0] = String(address).trim().toLowerCase().split(/@(?=[^@]*$)/);
+  const domain = (domain0 || '').replace(/\.+$/, ''); // 'gmail.com.' is the same place as 'gmail.com'
   let user = (local || '').split('+')[0];
   const d = domain === 'googlemail.com' ? 'gmail.com' : domain;
   if (d === 'gmail.com') user = user.replace(/\./g, '');
