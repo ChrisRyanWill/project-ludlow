@@ -84,6 +84,7 @@ The original build specifications are in [`docs/spec/`](docs/spec/) and double a
 ## Before real-world use
 
 - **Host the server where no trustee controls it**, or the release lock binds nothing (it is enforced by the server; see the threat model).
+- **To run a server, follow [docs/DEPLOY.md](docs/DEPLOY.md)**: who should run it, the master key, HTTPS, checking the fingerprint, backups and updates.
 - **Read the [threat model](docs/THREAT_MODEL.md) first.** An [internal, AI-assisted security review](docs/reviews/2026-09-internal-review-1.md) found and fixed real problems and wrote down design-level limits (the biggest, a server that lies about which keys belong to whom, is now closed for cards and reports and still open for the workspace's grievance and vote keys). It is not an independent audit.
 - **Have a labor attorney review everything in `content/legal/`.** Every `TODO(lawyer)` / `TODO(accountant)` is a real open question.
 - Get an independent security review of `shared/crypto.js`, `server/`, and the deployment. Read the threat model first.
