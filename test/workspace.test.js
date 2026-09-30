@@ -287,6 +287,21 @@ describe('workspace: secret ballots and self-executing votes', () => {
     assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions[0].status, 'opened');
     assert.equal((await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions[0].overdue, false); // opened: no longer overdue
   });
+
+  it('the 14 days to open a petition count in the union\'s time zone, not UTC', async () => {
+    const mk = await ws.as(4, 'POST', '/api/ws/petitions', { title: 'Vote on parking', type: 'general', options: ['Yes', 'No'], passRule: 'majority' });
+    for (const i of [4, 5]) await ws.as(i, 'POST', `/api/ws/petitions/${mk.json.petitionId}/sign`);
+    const tz = 'Pacific/Kiritimati', old = h.app.db.prepare('SELECT timezone FROM ws_workspaces WHERE id=?').get(ws.wsId).timezone; // UTC+14
+    h.app.db.prepare('UPDATE ws_workspaces SET timezone=? WHERE id=?').run(tz, ws.wsId);
+    try {
+      const today = D.todayIn(tz);
+      // qualified at 01:00 local time 14 days ago, which is still the day before in UTC
+      h.app.db.prepare('UPDATE ws_petitions SET qualified_at=? WHERE id=?').run(`${D.addCalendar(today, -15)}T11:00:00.000Z`, mk.json.petitionId);
+      const p = (await ws.as(4, 'GET', '/api/ws/petitions')).json.petitions.find((x) => x.id === mk.json.petitionId);
+      assert.equal(p.openBy, today); // the last day is today, locally
+      assert.equal(p.overdue, false);
+    } finally { h.app.db.prepare('UPDATE ws_workspaces SET timezone=? WHERE id=?').run(old, ws.wsId); }
+  });
 });
 
 describe('workspace: one person cannot make up a result, or take power alone', () => {

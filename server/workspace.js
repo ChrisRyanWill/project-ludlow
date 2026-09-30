@@ -585,14 +585,14 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
   // ---------- petitions: members can force a vote or a recall ----------
   const petitionView = (me, p) => {
     const signers = db.prepare('SELECT COUNT(*) c FROM ws_petition_signers WHERE petition_id=?').get(p.id).c;
-    const openBy = p.qualified_at ? addCalendar(p.qualified_at.slice(0, 10), 14) : null;
+    const openBy = p.qualified_at ? addCalendar(todayIn(me.ws.timezone, new Date(p.qualified_at)), 14) : null; // counted in the union's time zone, like me.today
     return {
       // The bylaws give the committee 14 days to open a qualified petition. The server cannot open it for them (the ballot key is made in a
       // committee browser), so it makes a missed deadline plain to every member instead.
       overdue: p.status === 'qualified' && !!openBy && openBy < me.today,
       id: p.id, title: p.title, description: p.description, voteType: p.vote_type, options: JSON.parse(p.options_json), passRule: p.pass_rule, effect: p.effect_json ? JSON.parse(p.effect_json) : null,
       status: p.status, needed: p.needed, signers, signedByMe: !!db.prepare('SELECT 1 FROM ws_petition_signers WHERE petition_id=? AND member_id=?').get(p.id, me.id),
-      createdAt: p.created_at, qualifiedAt: p.qualified_at, openBy: p.qualified_at ? addCalendar(p.qualified_at.slice(0, 10), 14) : null, voteId: p.vote_id,
+      createdAt: p.created_at, qualifiedAt: p.qualified_at, openBy, voteId: p.vote_id,
     };
   };
   W('GET', '/api/ws/petitions', 'vote.read', ({ me }) => ({ petitions: db.prepare('SELECT * FROM ws_petitions WHERE workspace_id=? ORDER BY created_at DESC').all(me.wsId).map((p) => petitionView(me, p)) }));
