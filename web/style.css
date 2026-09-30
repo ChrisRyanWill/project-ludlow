@@ -159,3 +159,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 @media (max-width: 420px) { html { font-size: 16.5px; } .top-in { padding: .5rem 12px; } .page { padding: .6rem 12px 2.5rem; } .bar-l { flex-basis: 40%; } .tabs-in { padding: 0 6px; gap: 0; } .tabs a { padding: .8rem .62rem; font-size: .95rem; } h1 { font-size: 1.8rem; } .hero h1 { font-size: 1.9rem; } }
 @media print { :root { color-scheme: light; --bg: #fff; --card: #fff; --paper: #fff; --ink: #000; --line: #999; } .top, .foot, .tabs, .btn, .quick { display: none !important; } body { background: #fff; color: #000; } .card { box-shadow: none; } }
+/* Next-step guide: quiet, one card, and a brief outline on the place it points to */
+.next-step { border: 1px solid var(--line); border-left: 5px solid var(--gold, var(--brand)); background: var(--card); border-radius: 8px; padding: .75rem 1rem; margin: 1rem 0; }
+.next-step .row { margin-top: .4rem; }
+.next-step-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted, inherit); }
+.guide-glow { outline: 3px solid var(--gold, var(--brand)); outline-offset: 4px; transition: outline-color .6s; }
+@media (prefers-reduced-motion: reduce) { .guide-glow { transition: none; } }

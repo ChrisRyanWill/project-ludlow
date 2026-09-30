@@ -280,6 +280,11 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
     await unlockDashboard(page, 1);
     await page.getByRole('heading', { name: 'Your committee' }).waitFor();
     assert.match(await page.locator('body').innerText(), /Only trustee 1 can open the cards right now/);
+    // the guide suggests the one next step, and "Show me" takes the founder to it
+    const guide = page.locator('.next-step');
+    await guide.getByText('Invite your other trustees.').waitFor();
+    await btn(guide, 'Show me').click();
+    await page.locator('#g-committee.guide-glow').waitFor();
     await shot(page, '06b-committee');
     for (const idx of [2, 3]) {
       await btn(page, 'Get invite link').first().click();

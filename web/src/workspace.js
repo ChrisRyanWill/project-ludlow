@@ -6,6 +6,8 @@ import { store } from './store.js';
 import { t } from './i18n.js';
 import { packOf } from './packs.js';
 import { verifyChain, auditFields, checkPinned, auditRows } from '../../shared/verify.js';
+import { nextStepCard } from './guide.js';
+import { workspaceStep } from '../../shared/guide.js';
 import { plainMd } from './format.js';
 import { ASSIGNABLE_ROLES } from '../../shared/permissions.js';
 import { POLICY_FIELDS } from '../../shared/constants.js';
@@ -92,7 +94,9 @@ async function homeTab() {
   return wsFrame('home', view((update) => div(
     h1(t('Hello, {name}', { name: info.member.name.split(' ')[0] })),
     p({ class: 'muted' }, info.roles.filter((r) => ROLE_NAMES[r]).map((r) => t(ROLE_NAMES[r])).join(', ') || t('Unit employee')),
-    !info.roles.includes('member') ? callout('info', t('You are a unit employee. You can get help and see the contract no matter what. To vote and see the union\'s money, join the union.'), ' ', btn(t('Join the union'), act(async () => { await wcall('POST', '/api/ws/me/join'); render(); }), { kind: 'primary small' })) : null,
+    nextStepCard(workspaceStep({ isMember: info.roles.includes('member'), voteNow: forMe[0] || null, overdueCase: mine.find((g) => g.urgency?.left < 0) || null,
+      dueTask: soon.find((x) => x.urgency.left <= 14) || null }), `w.${WS.workspaceId}`),
+    !info.roles.includes('member') ? div({ id: 'g-join' }, callout('info', t('You are a unit employee. You can get help and see the contract no matter what. To vote and see the union\'s money, join the union.'), ' ', btn(t('Join the union'), act(async () => { await wcall('POST', '/api/ws/me/join'); render(); }), { kind: 'primary small' }))) : null,
     div({ class: 'grid2' },
       div({ class: 'card' }, h2(t('What is happening')),
         forMe.length ? forMe.map((v) => div({ class: 'row between' }, span(strong(v.title), ' ', span({ class: 'small muted' }, t('closes {d}', { d: fmtDate(v.closesAt) }))), linkBtn(t('Vote now'), `/w/votes/${v.id}`, 'primary small'))) : p({ class: 'muted' }, open.length ? t('You have voted on everything that is open.') : t('No votes are open right now.')),

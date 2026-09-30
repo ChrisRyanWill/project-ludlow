@@ -3,6 +3,8 @@ import * as C from '../../shared/crypto.js';
 import { api, tcall, friendly } from './api.js';
 import { authenticate, checkMySeat, rosterToSign, RosterError, isCommit } from '../../shared/roster.js';
 import { store } from './store.js';
+import { nextStepCard } from './guide.js';
+import { organizeStep } from '../../shared/guide.js';
 import { cardTextMatches } from '../../shared/verify.js';
 import { t } from './i18n.js';
 import { packOf, markersFor } from './packs.js';
@@ -53,24 +55,26 @@ export async function TrusteeDashboard() {
   return shell(div({ class: 'wrap' }, view((update) => div(
     div({ class: 'row between' }, h1(meta.unionName), badge(raw.status === 'active' ? t('Active') : raw.status === 'frozen' ? t('Paused') : t('Setting up'), raw.status === 'active' ? 'ok' : 'warn')),
     p({ class: 'muted' }, t('{employer}. You are trustee {i}{name}. Any {k} of {n} trustees together can open the cards.', { employer: meta.employerName, i: T.index, name: myName ? ` (${myName})` : '', k: raw.k, n: raw.n })),
+    active ? nextStepCard(organizeStep({ status: raw.status, isFounder: T.index === 1, n: raw.n, joined: raw.trustees.filter((x) => x.enrolled).length, confirmed: !!raw.roster,
+      solo: prog.solo || 0, pending: pending.length, vouched: prog.vouched, releaseMin: prog.releaseMin, k: raw.k }), `t.${T.campaignId}`) : null,
     raw.inactivityWarn ? callout('warn', t('This campaign has been quiet for a while. If nothing happens in {d} days it will be deleted automatically.', { d: raw.inactivityDaysLeft })) : null,
     !active ? div({ class: 'card' }, h2(t('Waiting for trustees')), ul(raw.trustees.map((x) => li((meta.trusteeNames.find((n) => n.index === x.index)?.displayName || t('Trustee {n}', { n: x.index })) + ': ' + (x.enrolled ? '✓ ' + t('ready') : t('has not set up a key yet')))))) : null,
     active ? div({ class: 'card' }, h2(t('Where we are')), progressView({ count: prog.vouched, size: meta.estimatedUnitSize, markers: withRelease(markersFor(pack, meta), prog.releaseMin, meta.estimatedUnitSize) }), momentum(prog.history, meta.estimatedUnitSize), p({ class: 'small muted' }, waiting(prog.pending))) : null,
     active ? committeeCard(raw, meta, prog, S, update) : null,
-    raw.status === 'active' ? div({ class: 'card' }, h2(t('Invite coworkers')),
+    raw.status === 'active' ? div({ class: 'card', id: 'g-invite' }, h2(t('Invite coworkers')),
       div({ class: 'row' },
         btn(t('Invite one person'), act(async () => { S.links.unshift({ kind: 'direct', link: await makeInvite('direct') }); update(); }), { kind: 'primary' }),
         btn(t('Create a group link'), act(async () => { S.links.unshift({ kind: 'group', link: await makeInvite('group') }); update(); }), { kind: 'secondary' })),
       S.links.map((l) => inviteBox({ link: l.link, employer: meta.employerName, kind: l.kind }))) : null,
-    pending.length ? div({ class: 'card' }, h2(t('Cards waiting to be confirmed')), p({ class: 'small muted' }, t('Enter the two-word code only if you have confirmed the person in person.')), pending.map((q, n) => trusteeVouch(q, n + 1))) : null,
+    pending.length ? div({ class: 'card', id: 'g-pending' }, h2(t('Cards waiting to be confirmed')), p({ class: 'small muted' }, t('Enter the two-word code only if you have confirmed the person in person.')), pending.map((q, n) => trusteeVouch(q, n + 1))) : null,
     active ? reportsCard(prog.reports, meta, pack, S, update) : null,
-    active ? div({ class: 'card' }, h2(t('Open the cards')),
+    active ? div({ class: 'card', id: 'g-open' }, h2(t('Open the cards')),
       prog.vouched < prog.releaseMin
         ? callout('warn', strong(t('The cards are locked.')), ' ', t('{have} of the {need} people needed have signed and been counted. Until then nobody can open them, not even all the trustees together.', { have: prog.vouched, need: prog.releaseMin }))
         : p(t('The number is met. When you decide together to go public, {k} trustees meet, ideally in person, and open the cards on one device.', { k: raw.k })),
       prog.vouched < prog.releaseMin ? btn(t('Unlock and export'), () => {}, { kind: 'primary', disabled: true }) : linkBtn(t('Unlock and export'), '/t/unlock', 'primary')) : null,
     active ? releaseCard(prog, raw) : null,
-    active ? div({ class: 'card' }, h2(t('Safety controls')),
+    active ? div({ class: 'card', id: 'g-safety' }, h2(t('Safety controls')),
       div({ class: 'row' },
         btn(raw.status === 'frozen' ? t('Resume signing') : t('Pause signing'), act(async () => { await tcall(T, 'POST /api/campaigns/:id/freeze', { body: { frozen: raw.status !== 'frozen' } }); render(); }), { kind: 'secondary' }),
         btn(t('Vote to destroy this campaign'), act(async () => {
@@ -170,7 +174,7 @@ function committeeCard(raw, meta, prog, S, update) {
     return callout('ok', t('The committee is confirmed: any {k} of {n} trustees together can open the cards.', { k: raw.k, n: raw.n }),
       founder ? '' : ' ' + (status === 'ok' ? t('Your key is in the roster the founder signed.') : t('(This device holds no key check from its invitation, so it could not verify the roster.)')));
   };
-  return div({ class: 'card' }, h2(t('Your committee')),
+  return div({ class: 'card', id: 'g-committee' }, h2(t('Your committee')),
     banner(),
     T.keys?.boxPublicKey ? div({ class: 'keycheck' }, strong(t('Your key words')),
       p({ class: 'small muted' }, t('Read these to trustee 1 by phone or in person. They check them before the committee is confirmed, so nobody can slip in a different key.')),

@@ -384,3 +384,15 @@ This work runs on a limited budget, so spend it where it counts. Suggested use, 
 - **Verified: builds are reproducible.** The new CI job passed on this PR (run 45): a local build and the Docker image's build stage produce byte-identical `app.js`, and the Docker build itself works. README, threat model, PROTOCOL and site now say builds are reproducible and checked on every change, instead of "when last checked". The same run was green throughout: unit and API on Node 20 and 22, browser end-to-end, site.
 - **#37 Stage 1, part: each device remembers role holders' keys.** `keyring()` in `web/src/wsbase.js` (logic in `compareKeyPins`, `shared/verify.js`) is now the only way the browser gets the keys it seals grievances, hand-overs and vote shares to. A key that changed since this device last used it is shown with the person's name and new key words, and nothing is sealed unless the person confirms they checked it in person. Unit test, and a browser test where the server swaps the chief steward's key and the worker's filing is refused. Limit (stated in the design note): it cannot catch a key that was false from the start.
 - **Commit identity:** commits from this point use the repository's noreply identity. Earlier commits on this branch carry the author the cloud environment injected; rewriting them is the owner's decision (asked on the PR).
+
+### Owner request: guide people step by step (started 30 September)
+
+The owner asked for the app to lead people through every step, "easier than setting up a Facebook account", without being obvious or annoying. **Done (foundation):**
+- `shared/guide.js`: pure functions that return the ONE next step for where a person is, or nothing when there is nothing to do (`organizeStep` for trustees, `workspaceStep` for members). Steps are data: id, sentence, reason, and a place on the page or a link. Unit tested.
+- `web/src/guide.js`: a quiet "Next step" card with **Show me** (scrolls to the right section, outlines it briefly and focuses its first control) or **Go there**, and **Hide this** per step. It never pops up or blocks. Shown on the trustee dashboard and the workspace home; Spanish included. Browser test: the founder sees "Invite your other trustees." and Show me highlights the committee.
+
+**Next, in order of value** (not started):
+1. Guides for the moments that end with something sent outside the app, each as a click-by-click checklist that ends in a **draft for a person to send** (never sent by the app, rule 14): opening the cards and reviewing the filing package; asking the employer for recognition (the letter in the package); a Weingarten request in a meeting; filing a grievance step with the employer; an information request; preparing a labor board petition from the package. Legal wording for each must come from `content/legal/` and carry `TODO(lawyer)` where unsure.
+2. A first-visit guide for signers and members (their own next step on `/m`).
+3. Stewards: the next due step on each case, from the deadline engine.
+4. A short "What happens next" line after every action that finishes something.

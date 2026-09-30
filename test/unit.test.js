@@ -9,6 +9,7 @@ import { makeLimiter } from '../server/rate.js';
 import { clientIp } from '../server/http.js';
 import { loadMasterKey } from '../server/kms.js';
 import { mailboxKey } from '../server/campaign.js';
+import { organizeStep, workspaceStep } from '../shared/guide.js';
 import { loadConfig } from '../server/config.js';
 import { openDb } from '../server/db.js';
 import Database from 'better-sqlite3';
@@ -681,4 +682,25 @@ test('role holders\' keys are remembered per device, and a changed key is report
   assert.deepEqual(swapped.changed.map((c) => [c.memberId, c.name, c.words]), [['m1', 'Ana', C.keyWords(evil.boxPublicKey)]]);
   assert.equal(swapped.pins.m1, evil.boxPublicKey); // what to remember if the person confirms they checked it
   assert.equal(first.pins.m1, a.boxPublicKey); // the old pins are not changed by looking
+});
+
+test('the guide shows the one next step for where a person is, and nothing when there is nothing to do', () => {
+  const base = { status: 'active', isFounder: true, n: 3, joined: 3, confirmed: true, solo: 0, pending: 0, vouched: 2, releaseMin: 6, k: 2 };
+  const step = (o) => organizeStep({ ...base, ...o }).id;
+  assert.equal(step({ joined: 1 }), 'invite-trustees');
+  assert.equal(step({ joined: 1, isFounder: false }), 'wait-trustees');
+  assert.equal(step({ confirmed: false }), 'confirm-committee');
+  assert.equal(step({ solo: 3 }), 'lock-early');
+  assert.equal(step({ pending: 2 }), 'confirm-pending');
+  assert.equal(step({}), 'invite-coworkers');
+  assert.deepEqual(organizeStep(base).vars, { m: 4 });
+  assert.equal(step({ vouched: 6 }), 'open-cards');
+  assert.equal(step({ status: 'frozen' }), 'frozen');
+  assert.match(organizeStep({ ...base, vouched: 6 }).why, /nothing is sent for you/); // it never implies the app files anything
+  const w = { isMember: true, voteNow: null, overdueCase: null, dueTask: null };
+  assert.equal(workspaceStep(w), null); // nothing to do: no card at all
+  assert.equal(workspaceStep({ ...w, voteNow: { id: 'v1', title: 'Dues' } }).href, '/w/votes/v1');
+  assert.equal(workspaceStep({ ...w, overdueCase: { id: 'g1' } }).href, '/w/help/g1');
+  assert.equal(workspaceStep({ ...w, isMember: false }).id, 'join');
+  assert.equal(workspaceStep({ ...w, isMember: false, voteNow: { id: 'v2', title: 'x' } }).id, 'vote-v2'); // the most urgent first
 });
