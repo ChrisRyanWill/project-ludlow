@@ -268,6 +268,15 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
 
   it('the other trustees join later, and the founder locks the early cards to the committee', async () => {
     const page = pages.trustees;
+    // Someone opens the signing page while cards are still sealed to the founder alone, and is still filling it in when the committee is confirmed.
+    const lateLink = await freshInvite();
+    const late = await newPage('late-signer');
+    const cardPosts = [];
+    late.on('response', (r) => { if (r.request().method() === 'POST' && /\/api\/cards$/.test(r.url())) cardPosts.push(r.status()); });
+    await late.goto(lateLink);
+    await btn(late, 'Read the card').click();
+    for (const [label, value] of [['Full legal name', 'Lena Late'], ['Personal email', 'lena@example.org'], ['Mobile phone', '+15555550177'], ['Type your full name to sign', 'Lena Late']]) await late.getByLabel(label).fill(value);
+    await late.locator('.check input').check();
     await unlockDashboard(page, 1);
     await page.getByRole('heading', { name: 'Your committee' }).waitFor();
     assert.match(await page.locator('body').innerText(), /Only trustee 1 can open the cards right now/);
@@ -299,6 +308,16 @@ describe('browser: organize, open the cards, then run the union', { skip: CHROME
     await page.locator('.callout.ok', { hasText: 'Any 2 of 3 trustees together can open the cards.' }).waitFor();
     assert.deepEqual(h.app.db.prepare('SELECT DISTINCT seal_mode m FROM cards').all().map((r) => r.m), ['shamir']);
     assert.ok(h.app.db.prepare('SELECT roster_json j FROM campaigns').get().j);
+    // The late signer now presses Sign. Their page sealed for the founder alone; the server refuses that (committee_changed), and the page checks
+    // the committee again, re-seals to the signed roster and sends it, without asking the person anything.
+    await btn(late, 'Sign the card').click();
+    await late.getByRole('heading', { name: /Your card is signed and counted|Almost done/ }).waitFor();
+    assert.deepEqual(cardPosts, [409, 200]);
+    assert.deepEqual(h.app.db.prepare('SELECT DISTINCT seal_mode m FROM cards').all().map((r) => r.m), ['shamir']);
+    // Lena then withdraws her card (as any signer can), so the rest of this journey counts the same cards as before.
+    const lateSecret = new URLSearchParams((await late.locator('.link-box').innerText()).trim().split('#')[1]).get('s');
+    assert.equal((await h.call('DELETE', '/api/cards/me', { auth: 'Bearer ' + C.deriveMember(lateSecret).authToken })).status, 200);
+    await late.context().close(); delete pages['late-signer'];
     // another trustee checks the roster against their own invitation: the founder's signature holds, and their own key is in it
     await unlockDashboard(page, 2);
     await page.getByText('Your key is in the roster the founder signed.').waitFor();
