@@ -114,12 +114,20 @@ export async function VoteDetail({ id }) {
       inCommittee ? linkBtn(t('Count the ballots'), `/w/votes/${id}/tally`, 'primary') : null) : null,
     v.status === 'tallied' ? resultsBlock(v, S, receipts, update) : null)));
 
+  // Every voter must seal to the same ballot key, the one whose secret the committee holds. The key comes from the website, so a website that had
+  // been tampered with could give one member a key of its own. Comparing these words with a coworker (or the committee) before voting catches that.
+  function ballotKeyCheck(v) {
+    return details({ class: 'small' }, summary(t('Check the ballot key before you vote')),
+      div({ class: 'keywords', lang: 'en' }, C.keyWords(v.votePublicKey)),
+      p({ class: 'small muted' }, t('Everyone in this vote should see the same words. Compare them with a coworker or someone on the election committee. If yours are different, do not vote: tell the committee.')));
+  }
   function openBlock(v, S, update) {
     return div({ class: 'card' },
       v.hasVoted ? div(callout('ok', t('You have voted.')), S.receipt ? receiptBox(S.receipt) : p({ class: 'small muted' }, t('Your receipt code was shown when you voted.'))) :
         v.eligible ? div(h2(t('Cast your secret ballot')),
           div({ class: 'stack' }, v.options.map((o, i) => div({ class: `choice ${S.choice === i ? 'on' : ''}`, role: 'radio', 'aria-checked': S.choice === i, tabindex: 0, onclick: () => { S.choice = i; update(); }, onkeydown: (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); S.choice = i; update(); } } }, strong(o)))),
           p({ class: 'small muted' }, t('Your ballot is stored without your name or the time you voted, so officers and other members cannot see how you voted. You cannot change your vote afterward.')),
+          ballotKeyCheck(v),
           btn(t('Cast my ballot'), act(async () => {
             if (S.choice == null) return toast(t('Choose an option first.'), 'bad');
             const b = C.castBallot(v.votePublicKey, S.choice);
@@ -178,6 +186,8 @@ export async function TallyPage({ id }) {
         exclude: (f) => S.who.includes(f.memberId) || f.workspaceId !== WS.workspaceId || !b.committee.some((c) => c.memberId === f.memberId),
         onUnlock: (file, secrets) => { const m = b.committee.find((c) => c.memberId === file.memberId); S.shares.push(C.boxOpen(m.sealed, secrets.boxPublicKey, secrets.boxSecretKey)); S.who.push(file.memberId); S.signers.push({ memberId: file.memberId, key: secrets.signSecretKey }); update(); },
       })) : div({ class: 'card' }, h2(t('Counted')),
+        details({ class: 'small' }, summary(t('The ballot key you rebuilt')), div({ class: 'keywords', lang: 'en' }, C.keyWords(b.votePublicKey)),
+          p({ class: 'small muted' }, t('Voters were asked to check these same words before voting. A ballot sealed to any other key shows up below as one that could not be read.'))),
         div({ class: 'bars' }, b.options.map((o, i) => div({ class: 'bar-row' }, span({ class: 'bar-l' }, o), span({ class: 'bar-n' }, S.counts.counts[i])))),
         S.counts.invalid ? p({ class: 'small' }, t('{n} ballot(s) could not be read.', { n: S.counts.invalid })) : null,
         p(ev.passed ? strong(t('This passes.')) : strong(t('This does not pass.'))),

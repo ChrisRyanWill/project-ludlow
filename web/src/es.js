@@ -800,4 +800,9 @@ export default {
   // a case key that does not open (first draft, needs a native reviewer: #10)
   'The key you were given for this case does not open it. Remove it, so that the worker or a steward can share a working one with you.': 'La llave que te dieron para este caso no lo abre. Quítala para que el trabajador o un delegado pueda compartirte una que funcione.',
   'Remove my key': 'Quitar mi llave',
+  // checking the ballot key (first draft, needs a native reviewer: #10)
+  'Check the ballot key before you vote': 'Comprueba la llave de las papeletas antes de votar',
+  'Everyone in this vote should see the same words. Compare them with a coworker or someone on the election committee. If yours are different, do not vote: tell the committee.': 'Todas las personas de esta votación deberían ver las mismas palabras. Compáralas con un compañero o con alguien del comité electoral. Si las tuyas son distintas, no votes: avísale al comité.',
+  'The ballot key you rebuilt': 'La llave de las papeletas que reconstruyeron',
+  'Voters were asked to check these same words before voting. A ballot sealed to any other key shows up below as one that could not be read.': 'A quienes votaron se les pidió comprobar estas mismas palabras antes de votar. Una papeleta sellada con cualquier otra llave aparece abajo como una que no se pudo leer.',
 };

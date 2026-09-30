@@ -482,6 +482,8 @@ print(json.dumps({'names': z.namelist(), 'roster': r('roster.csv'), 'letter': r(
       await p.getByRole('link', { name: 'Set our monthly dues' }).click();
       await p.getByRole('heading', { name: 'Cast your secret ballot' }).waitFor();
       await p.locator('.choice').first().click(); // "Yes"
+      await p.locator('summary', { hasText: 'Check the ballot key before you vote' }).click(); // the words every voter can compare
+      assert.equal((await p.locator('details[open] .keywords').innerText()).trim(), C.keyWords(h.app.db.prepare("SELECT vote_public_key k FROM ws_votes WHERE title='Set our monthly dues'").get().k));
       await btn(p, 'Cast my ballot').click();
       await p.getByText('You have voted.').waitFor();
       assert.match(await p.locator('.code').innerText(), /^[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$/); // the receipt
