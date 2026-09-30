@@ -800,8 +800,15 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
   it('union health shows aggregates only and hides small groups', async () => {
     const hl = (await ws.as(0, 'GET', '/api/ws/health')).json;
     assert.deepEqual([hl.unitSize, hl.members], [8, 7]);
-    assert.deepEqual(hl.shifts.find((x) => x.shift === 'Day'), { shift: 'Day', total: 6, members: 6 });
     assert.deepEqual(hl.shifts.find((x) => x.shift === 'Night'), { shift: 'Night', suppressed: true }); // 2 people: hidden
+    // ...and Day too: otherwise 8 people in all, minus the 6 on Day, gives Night's size away
+    assert.deepEqual(hl.shifts.find((x) => x.shift === 'Day'), { shift: 'Day', suppressed: true });
+    // with three shifts, one small one hidden, the next smallest is hidden with it and the largest still shows
+    const t = await makeWorkspace(h, [...Array.from({ length: 7 }, (_, i) => person(`Day${i} Qqq`, i, { shift: 'Day', ...(i === 0 ? { roles: ['officer'] } : {}) })),
+      ...Array.from({ length: 5 }, (_, i) => person(`Eve${i} Qqq`, i, { shift: 'Evening' })), ...Array.from({ length: 2 }, (_, i) => person(`Night${i} Qqq`, i, { shift: 'Night' }))]);
+    const three = (await t.as(0, 'GET', '/api/ws/health')).json.shifts;
+    assert.deepEqual(three.filter((x) => x.suppressed).map((x) => x.shift).sort(), ['Evening', 'Night']);
+    assert.deepEqual(three.find((x) => x.shift === 'Day'), { shift: 'Day', total: 7, members: 7 });
     assert.equal((await ws.as(4, 'GET', '/api/ws/health')).status, 403);
     const cal = (await ws.as(0, 'GET', '/api/ws/compliance')).json.tasks;
     assert.ok(cal.find((t) => t.key === 'lm1').dueOn);

@@ -67,6 +67,6 @@
 
 ### Smaller points
 
-- **Small unions:** with very few members, counts and shifts are inherently identifying; small-group suppression starts at 5, and a hidden group can sometimes be recovered by subtraction when only one group is hidden.
+- **Small unions:** with very few members, counts and shifts are inherently identifying; groups of fewer than 5 are hidden, and when only one would be hidden the next smallest is hidden with it, so the totals cannot give it away by subtraction. Within a group that is shown, a very small number of non-members (say 1 of 6) can still point at someone; that is not suppressed yet.
 - The spreadsheet exports neutralise formula injection, and PDFs replace characters the standard fonts cannot draw with `?` (the CSV keeps full Unicode).
 - **Not independently audited.**
