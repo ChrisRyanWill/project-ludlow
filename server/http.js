@@ -61,11 +61,12 @@ async function readJson(req, limit) {
   const chunks = [];
   let n = 0;
   for await (const c of req) { n += c.length; if (n > limit) fail(413, 'too_large'); chunks.push(c); }
-  if (!n) return {};
+  if (!n) return { v: {}, raw: '' };
+  const raw = Buffer.concat(chunks).toString('utf8');
   let v;
-  try { v = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { fail(400, 'bad_json'); }
+  try { v = JSON.parse(raw); } catch { fail(400, 'bad_json'); }
   if (v === null || typeof v !== 'object' || Array.isArray(v)) fail(400, 'bad_json');
-  return v;
+  return { v, raw }; // the exact text too: a trustee's signature covers it
 }
 
 const staticCache = new Map();
@@ -132,8 +133,8 @@ export function createHttpServer({ router, cfg, limiter }) {
         if (!m) { route = '(unmatched)'; return send(res, 404, { error: 'not_found' }); }
         route = m.route.pattern; // the pattern, never the raw path (which may contain ids)
         if (!limiter(clientIp(req, cfg), m.route.opts.strict)) return send(res, 429, { error: 'rate_limited' });
-        const body = req.method === 'GET' || req.method === 'HEAD' ? {} : await readJson(req, m.route.opts.maxBody || 1_000_000);
-        const out = await m.route.handler({ req, params: m.params, body, query: Object.fromEntries(url.searchParams), headers: req.headers });
+        const { v: body, raw: rawBody } = req.method === 'GET' || req.method === 'HEAD' ? { v: {}, raw: '' } : await readJson(req, m.route.opts.maxBody || 1_000_000);
+        const out = await m.route.handler({ req, params: m.params, body, rawBody, query: Object.fromEntries(url.searchParams), headers: req.headers });
         return send(res, 200, out ?? {});
       }
       return await serveStatic(req, res, url, cfg.staticDir);

@@ -2,7 +2,7 @@
 // tokens, public keys and counts. It never receives a key that opens a card or the campaign metadata.
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { fail } from './http.js';
-import { hashToken, vouchHash, verifyAuth, verifyRoster, canonicalJson } from '../shared/crypto.js';
+import { hashToken, vouchHash, verifyAuth, verifyRoster, canonicalJson, bodyHash } from '../shared/crypto.js';
 import { issueChallenge, takeChallenge, bearer, sigHeader } from './auth.js';
 import { confirmationEmail } from './mail.js';
 import { makeLimiter } from './rate.js';
@@ -58,7 +58,7 @@ export function campaignRoutes({ router, db, cfg, mail }) {
     const nonce = takeChallenge(a.challengeId);
     if (!nonce) fail(401, 'bad_challenge');
     const t = db.prepare('SELECT sign_public_key k FROM trustees WHERE campaign_id=? AND trustee_index=? AND sign_public_key IS NOT NULL').get(campaignId, Number(a.index));
-    if (!t || !verifyAuth(t.k, a.sig, { nonce, route, scope: campaignId })) fail(401, 'bad_signature');
+    if (!t || !verifyAuth(t.k, a.sig, { nonce, route, scope: campaignId, bodyHash: bodyHash(ctx.rawBody) })) fail(401, 'bad_signature'); // the body is signed too
     return Number(a.index);
   }
   function cardByToken(ctx) {

@@ -214,7 +214,11 @@ export async function decryptCard({ campaignId, templateVersion, ciphertext, non
 }
 
 // ---------- challenge–response signatures (trustees and workspace members) ----------
-const authMsg = ({ nonce, route, scope }) => utf8(`${nonce}|${route}|${scope}`);
+// With `bodyHash` (trustee actions) the signature also covers the exact request body, so nobody between the browser and the server (a proxy that
+// terminates TLS, an extension) can change what a signed request does; it has its own domain so the two forms can never be confused. The
+// workspace sign-in signs no body: its body carries the signature itself.
+const authMsg = ({ nonce, route, scope, bodyHash: bh }) => utf8(bh === undefined ? `${nonce}|${route}|${scope}` : `ludlow auth v2|${nonce}|${route}|${scope}|${bh}`);
+export const bodyHash = (text) => sha256Hex(text || '');
 export const signAuth = (signSecretKey, parts) => b64(sodium.crypto_sign_detached(authMsg(parts), unb64(signSecretKey)));
 export function verifyAuth(signPublicKey, sig, parts) {
   try { return sodium.crypto_sign_verify_detached(unb64(sig), authMsg(parts), unb64(signPublicKey)); } catch { return false; }

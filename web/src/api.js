@@ -1,13 +1,13 @@
-import { signAuth } from '../../shared/crypto.js';
+import { signAuth, bodyHash } from '../../shared/crypto.js';
 
 export class ApiError extends Error {
   constructor(status, code, extra) { super(code); this.status = status; this.code = code; this.extra = extra; }
 }
 
-export async function api(method, path, { body, auth } = {}) {
+export async function api(method, path, { body, raw, auth } = {}) {
   let r;
   try {
-    r = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    r = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) }, body: raw ?? (body ? JSON.stringify(body) : undefined) });
   } catch { throw new ApiError(0, 'offline'); }
   let j = null;
   try { j = await r.json(); } catch { /* empty body */ }
@@ -16,14 +16,15 @@ export async function api(method, path, { body, auth } = {}) {
 }
 export const bearer = (t) => 'Bearer ' + t;
 
-// A trustee call: fetch a one-time challenge, sign `nonce | route | campaignId` with the trustee's
-// signing key, and send the signature instead of any password. The route string names the action.
+// A trustee call: fetch a one-time challenge, sign `nonce | route | campaignId | SHA-256(body)` with the trustee's
+// signing key, and send the signature instead of any password. The route string names the action; the body is sent exactly as signed.
 export async function tcall(T, route, { body, params = {} } = {}) {
   const [method, pattern] = route.split(' ');
   const path = pattern.replace(/:(\w+)/g, (_, k) => encodeURIComponent(params[k] ?? T.campaignId));
+  const raw = body ? JSON.stringify(body) : '';
   const ch = await api('POST', '/api/auth/challenge');
-  const sig = signAuth(T.keys.signSecretKey, { nonce: ch.nonce, route, scope: T.campaignId });
-  return api(method, path, { body, auth: `Sig ${ch.challengeId}.${T.index}.${sig}` });
+  const sig = signAuth(T.keys.signSecretKey, { nonce: ch.nonce, route, scope: T.campaignId, bodyHash: bodyHash(raw) });
+  return api(method, path, { raw: raw || undefined, auth: `Sig ${ch.challengeId}.${T.index}.${sig}` });
 }
 
 const FRIENDLY = {

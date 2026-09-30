@@ -613,3 +613,14 @@ test('an opened card whose text does not match its own fingerprint is flagged, n
   assert.equal(cardTextMatches({ cardText, cardTextSha256: C.sha256Hex(cardText).toUpperCase() }), true); // hex case is not a difference
   for (const bad of [{ cardText }, { cardTextSha256: C.sha256Hex(cardText) }, {}, null]) assert.equal(cardTextMatches(bad), false);
 });
+
+test('a trustee\'s signature covers the request body: the same signature does not carry a different body', () => {
+  const k = C.newKeypairs();
+  const parts = { nonce: 'n1', route: 'POST /api/campaigns/:id/release-min', scope: 'c1' };
+  const sig = C.signAuth(k.signSecretKey, { ...parts, bodyHash: C.bodyHash('{"value":50}') });
+  assert.equal(C.verifyAuth(k.signPublicKey, sig, { ...parts, bodyHash: C.bodyHash('{"value":50}') }), true);
+  assert.equal(C.verifyAuth(k.signPublicKey, sig, { ...parts, bodyHash: C.bodyHash('{"value":5}') }), false); // the body was changed on the way
+  assert.equal(C.verifyAuth(k.signPublicKey, sig, parts), false); // and it is not a body-less signature either
+  assert.equal(C.verifyAuth(k.signPublicKey, C.signAuth(k.signSecretKey, parts), { ...parts, bodyHash: C.bodyHash('') }), false);
+  assert.equal(C.bodyHash(undefined), C.bodyHash(''));
+});

@@ -17,7 +17,9 @@ export async function startApp(over = {}) {
   const port = await app.listen(0, '127.0.0.1');
   const base = `http://127.0.0.1:${port}`;
   async function call(method, url, { body, auth } = {}) {
-    const r = await fetch(base + url, { method, headers: { 'content-type': 'application/json', ...(auth ? { authorization: auth } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const raw = body ? JSON.stringify(body) : undefined;
+    if (auth?.signFor) auth = auth.signFor(raw);
+    const r = await fetch(base + url, { method, headers: { 'content-type': 'application/json', ...(auth ? { authorization: auth } : {}) }, body: raw });
     let json = null;
     try { json = await r.json(); } catch { /* not json */ }
     return { status: r.status, json, headers: r.headers };
@@ -37,9 +39,10 @@ export async function startApp(over = {}) {
   return { app, base, call, logs, dir, leaks, stop: async () => { await app.close(); rmSync(dir, { recursive: true, force: true }); setLogSink((l) => process.stdout.write(l + '\n')); } };
 }
 
+// Trustee signatures cover the exact body, which is only known when the request is sent, so this returns a signer that call() applies.
 export async function trusteeAuth(h, keys, index, route, campaignId) {
   const { json } = await h.call('POST', '/api/auth/challenge');
-  return `Sig ${json.challengeId}.${index}.${C.signAuth(keys.signSecretKey, { nonce: json.nonce, route, scope: campaignId })}`;
+  return { signFor: (raw) => `Sig ${json.challengeId}.${index}.${C.signAuth(keys.signSecretKey, { nonce: json.nonce, route, scope: campaignId, bodyHash: C.bodyHash(raw) })}` };
 }
 
 export async function makeCampaign(h, { n = 3, k = 2, meta = {}, releaseMin = 1, enroll = n, confirm = true } = {}) {

@@ -555,3 +555,23 @@ describe('campaign: the confirmation email cannot be used to send mail to arbitr
     } finally { await h3.stop(); }
   });
 });
+
+describe('campaign: a signed trustee request cannot be altered on the way', () => {
+  let h, camp;
+  before(async () => { h = await startApp(); camp = await makeCampaign(h, { n: 3, k: 2, releaseMin: 5 }); });
+  after(() => h.stop());
+
+  it('the signature covers the body, so changing it is refused', async () => {
+    const route = 'POST /api/campaigns/:id/release-min', t1 = camp.trustees.find((t) => t.index === 1);
+    const signedFor = async (text) => {
+      const { json } = await h.call('POST', '/api/auth/challenge');
+      return `Sig ${json.challengeId}.1.${C.signAuth(t1.keys.signSecretKey, { nonce: json.nonce, route, scope: camp.id, bodyHash: C.bodyHash(text) })}`;
+    };
+    const altered = await h.call('POST', `/api/campaigns/${camp.id}/release-min`, { auth: await signedFor('{"value":6}'), body: { value: 99999 } });
+    assert.deepEqual([altered.status, altered.json.error], [401, 'bad_signature']);
+    const legacy = await h.call('POST', '/api/auth/challenge'); // a signature that covers no body at all is not accepted either
+    const noBody = `Sig ${legacy.json.challengeId}.1.${C.signAuth(t1.keys.signSecretKey, { nonce: legacy.json.nonce, route, scope: camp.id })}`;
+    assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/release-min`, { auth: noBody, body: { value: 6 } })).status, 401);
+    assert.equal((await h.call('POST', `/api/campaigns/${camp.id}/release-min`, { auth: await signedFor('{"value":6}'), body: { value: 6 } })).status, 200);
+  });
+});
