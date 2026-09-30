@@ -847,6 +847,11 @@ describe('workspace: grievances (end-to-end encrypted, never gated by dues)', ()
     assert.equal((await share(WORKER, ws.members[EZRA].id, C.boxSeal(ws.members[EZRA].keys.boxPublicKey, C.randomBytes(32)))).status, 200); // a second hand-over...
     assert.equal(JSON.parse(h.app.db.prepare('SELECT sealed_keys k FROM ws_grievances WHERE id=?').get(id).k)[ws.members[EZRA].id], toEzra); // ...never replaces a key
     assert.ok((await ws.as(WORKER, 'GET', '/api/ws/me/access-log')).json.entries.some((e) => e.action === 'grievance.shared')); // and the worker sees it happened
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[OTHER].id, role: 'steward', op: 'add' })).status, 200);
+    assert.deepEqual((await share(WORKER, ws.members[OTHER].id, C.boxSeal(ws.members[OTHER].keys.boxPublicKey, key))).json, { shared: true }); // the worker hands it on themselves
+    assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[OTHER].id, role: 'steward', op: 'remove' })).status, 200);
+    const seen = (await ws.as(CHIEF, 'GET', '/api/ws/audit')).json.chain.filter((e) => e.action.startsWith('grievance.'));
+    assert.deepEqual(seen.filter((e) => e.actorId === ws.members[WORKER].id), []); // the worker's own hand-over does not name them either
     assert.equal((await ws.as(CHIEF, 'POST', '/api/ws/roles', { memberId: ws.members[EZRA].id, role: 'chief_steward', op: 'remove' })).status, 200);
   });
 

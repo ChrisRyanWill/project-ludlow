@@ -106,9 +106,11 @@ test('secret ballots: sealed to a key nobody holds whole; k committee members re
   assert.deepEqual(C.countBallots(vk.votePublicKey, sk, cast.map((c) => c.ciphertext), 3), { counts: [3, 1, 1], invalid: 0 });
   await assert.rejects(C.reconstructVoteKey([mine(committee[0])])); // one member alone cannot
   // A made-up share still combines (Shamir cannot tell), but into a key that does not match the vote's public key.
-  const wrong = await C.reconstructVoteKey([mine(committee[0]), mine(committee[1]), new Uint8Array(33).fill(7)]);
+  const [s0, s1] = [mine(committee[0]), mine(committee[1])];
+  const madeUp = new Uint8Array(33).fill(7); madeUp[32] = [7, 8, 9].find((x) => x !== s0[32] && x !== s1[32]); // an x the real shares do not use (theirs are random)
+  const wrong = await C.reconstructVoteKey([s0, s1, madeUp]);
   assert.notEqual(C.publicFromSecret(wrong), vk.votePublicKey);
-  const bent = mine(committee[1]); bent[0] ^= 1; // one flipped bit in a real share
+  const bent = mine(committee[1]); bent[10] ^= 1; // one flipped bit in a real share (a middle byte: X25519 clamps bits in the first and last, which could hide the change)
   assert.notEqual(C.publicFromSecret(await C.reconstructVoteKey([mine(committee[0]), bent])), vk.votePublicKey);
   await assert.rejects(C.reconstructVoteKey([mine(committee[0]), mine(committee[0])]), /bad_shares/); // the same share twice is not two
   const junk = C.countBallots(vk.votePublicKey, sk, ['A'.repeat(107)], 3);

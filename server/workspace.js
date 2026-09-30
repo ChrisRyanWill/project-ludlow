@@ -700,7 +700,7 @@ export function workspaceRoutes({ router, db, cfg, kms }) {
     keys[b.memberId] = b.sealedKey;
     db.transaction(() => {
       db.prepare('UPDATE ws_grievances SET sealed_keys=? WHERE id=?').run(JSON.stringify(keys), g.id);
-      audit(me.wsId, me.id, 'grievance.shared', 'grievance', g.id);
+      audit(me.wsId, me.id === g.submitted_by ? null : me.id, 'grievance.shared', 'grievance', g.id); // a worker handing on their own case is not named (it would say who filed it)
     })();
     return { shared: true };
   });
