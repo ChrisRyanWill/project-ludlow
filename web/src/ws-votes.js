@@ -183,7 +183,8 @@ export async function TallyPage({ id }) {
         b.hasEffect
           ? p({ class: 'small' }, strong(t('The ballot key will be published.')), ' ', t('This decision changes the dues, the rules or who holds a role, so anyone must be able to recount it.'))
           : label3(t('Publish the ballot key so every member can recount (recommended)'), S.publish, (v) => { S.publish = v; update(); }),
-        p({ class: 'small muted' }, t('Ballots are not linked to voters, so publishing the key shows how many chose what, not who. It lets any member check the count.')),
+        p({ class: 'small muted' }, t('Ballots are not linked to voters, so publishing the key shows how many chose what, not who. It lets any member check the count.'), ' ',
+          t('But once it is published, anyone who kept a copy of their own encrypted ballot can prove how they voted. If members could be pressured to show their vote (a strike or a contract vote, say), think about that before publishing.')),
         !b.hasEffect && !S.publish ? p({ class: 'small muted' }, t('Without the key nobody can recount. Each of the {k} committee members who counted signs these numbers, and the server accepts them only with all {k} signatures.', { k: b.thresholdK })) : null,
         btn(t('Publish the results'), act(async () => {
           const body = { counts: S.counts.counts };
